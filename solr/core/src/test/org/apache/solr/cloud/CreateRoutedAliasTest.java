@@ -30,13 +30,10 @@ import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.util.EntityUtils;
-import org.apache.lucene.util.IOUtils;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrServerException;
-import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.cloud.api.collections.TimeRoutedAlias;
 import org.apache.solr.common.cloud.Aliases;
@@ -44,10 +41,7 @@ import org.apache.solr.common.cloud.CompositeIdRouter;
 import org.apache.solr.common.cloud.DocCollection;
 import org.apache.solr.common.cloud.ImplicitDocRouter;
 import org.apache.solr.common.cloud.Replica;
-import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.util.DateMathParser;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -55,10 +49,7 @@ import org.junit.Test;
  * Direct http tests of the CreateRoutedAlias functionality.
  */
 @SolrTestCaseJ4.SuppressSSL
-public class CreateRoutedAliasTest extends SolrCloudTestCase {
-
-  private CloudSolrClient solrClient;
-  private CloseableHttpClient httpClient;
+public class CreateRoutedAliasTest extends RoutedAliasTestCase {
 
   @BeforeClass
   public static void setupCluster() throws Exception {
@@ -73,28 +64,6 @@ public class CreateRoutedAliasTest extends SolrCloudTestCase {
 //        .process(cluster.getSolrClient());
   }
 
-  @After
-  public void finish() throws Exception {
-    IOUtils.close(solrClient, httpClient);
-  }
-
-  @Before
-  public void doBefore() throws Exception {
-    solrClient = getCloudSolrClient(cluster);
-    httpClient = (CloseableHttpClient) solrClient.getHttpClient();
-    // delete aliases first since they refer to the collections
-    ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
-    //TODO create an API to delete collections attached to the routed alias when the alias is removed
-    zkStateReader.aliasesManager.update();// ensure we're seeing the latest
-    zkStateReader.aliasesManager.applyModificationAndExportToZk(aliases -> {
-      Aliases a = zkStateReader.getAliases();
-      for (String alias : a.getCollectionAliasMap().keySet()) {
-        a = a.cloneWithCollectionAlias(alias,null); // remove
-      }
-      return a;
-    });
-    cluster.deleteAllCollections();
-  }
 
   // This is a fairly complete test where we set many options and see that it both affected the created
   //  collection and that the alias metadata was saved accordingly
