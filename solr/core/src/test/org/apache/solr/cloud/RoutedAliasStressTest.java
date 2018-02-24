@@ -51,10 +51,10 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  public static final int THREADS_PER_INTERVAL = 1;
-  public static final int INTERVALS = 10; // how many intervals the TRA keeps
-  public static final int TOTAL_THREADS = 2 * THREADS_PER_INTERVAL * INTERVALS;
-  public static String INTERVAL_DURATION = "+3SECOND";
+  private static final int THREADS_PER_INTERVAL = 1;
+  private static final int INTERVALS = 10; // how many intervals the TRA keeps
+  private static final int TOTAL_THREADS = 2 * THREADS_PER_INTERVAL * INTERVALS;
+  private static String INTERVAL_DURATION = "+3SECOND";
 
   @BeforeClass
   public static void setupCluster() throws Exception {
@@ -76,10 +76,20 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
 //          synchronized (this) {
 //            tmpClient = client;
 //            if (tmpClient == null)
-//            tmpClient = client = new CloudSolrClient.Builder().withZkHost("localhost:2181").withZkChroot("/solr_stress_test").build();
+//            tmpClient = client = new CloudSolrClient.Builder().withZkHost("localhost:2181").withZkChroot("/solr__home_gus_clients_ds_tp_built_2017-12-29").build();
 //          }
 //        }
 //        return tmpClient;
+//      }
+//
+//      @Override
+//      public boolean iKnowThisTestDeletesTheEntireCluster() {
+//        return false;
+//      }
+//
+//      @Override
+//      public Set<CloudSolrClient> getClients() {
+//        return new HashSet<>(Collections.unmodifiableSet(new HashSet<>(Collections.singletonList(client))));
 //      }
 //
 //    };
@@ -131,6 +141,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
       try {
         Thread.sleep( INTERVALS * 60 * 1000); // assuming test should take no more than 1 min per interval
       } catch (InterruptedException e) {
+        // all good, no worries
       }
       for (Thread testerThread : testerThreads) {
         if (testerThread != null) {
@@ -171,6 +182,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     timeoutThread.interrupt(); // will cause timeout thread to complete so it doesn't linger
     timeoutThread.join();      // wait for said completion
 
+
     //nocommit : the above doesn't seem to be working as well as expected. Sometimes threads still linger :(
 
     // some time for possibly overloaded client to recover before test ends and mini cluster shuts down...
@@ -190,6 +202,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     // TODO: make sure set of collections is as expected (some should have been deleted)
 
     // TODO: run through added docs, make sure all are in correct collection
+
   }
 
 

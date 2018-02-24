@@ -17,7 +17,13 @@
 
 package org.apache.solr.cloud;
 
+import java.io.Closeable;
+import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.lucene.util.IOUtils;
@@ -27,8 +33,11 @@ import org.apache.solr.common.cloud.Aliases;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.junit.After;
 import org.junit.Before;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class RoutedAliasTestCase extends SolrCloudTestCase {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   protected CloudSolrClient solrClient;
   protected CloseableHttpClient httpClient;
@@ -43,24 +52,36 @@ public class RoutedAliasTestCase extends SolrCloudTestCase {
   @After
   public void tearDown() throws Exception {
     super.tearDown();
-    IOUtils.close(solrClient, httpClient);
+    IOUtils.close(solrClient, httpClient, cloudClientProvider);
   }
 
   @Before
   public void setUp() throws Exception {
-    cloudClientProvider = new  CloudSolrClientProvider() {
-      @Override
-      public CloudSolrClient getProvidedClient() {
-        CloudSolrClient cloudSolrClient = getCloudSolrClient(cluster);
-        cloudSolrClient.setDefaultCollection(getTestName()); // test should set this if somethinge else desired
-        return cloudSolrClient;
-      }
+    if (cloudClientProvider == null){
+      cloudClientProvider = new  CloudSolrClientProvider() {
 
-      @Override
-      public boolean iKnowThisTestDeletesTheEntireCluster() {
-        return true; // using the test infra cluster so no worries...
-      }
-    };
+        Set<CloudSolrClient> clients = new HashSet<>();
+
+        @Override
+        public CloudSolrClient getProvidedClient() {
+          CloudSolrClient cloudSolrClient = getCloudSolrClient(cluster);
+          cloudSolrClient.setDefaultCollection(getTestName()); // test should set this if somethinge else desired
+          clients.add(cloudSolrClient);
+          return cloudSolrClient;
+        }
+
+        @Override
+        public boolean iKnowThisTestDeletesTheEntireCluster() {
+          return true; // using the test infra cluster so no worries...
+        }
+
+        @Override
+        public Set<CloudSolrClient> getClients() {
+          return Collections.unmodifiableSet(clients);
+        }
+
+      };
+    }
     super.setUp();
     if (!cloudClientProvider.iKnowThisTestDeletesTheEntireCluster()) {
       fail("Apparently you don't know that this test WILL delete an entire cluster and have provided a custom client. " +
@@ -69,7 +90,17 @@ public class RoutedAliasTestCase extends SolrCloudTestCase {
           "you HAVE been warned.");
       return;
     }
-    solrClient = cloudClientProvider.getProvidedClient();
+
+    while (solrClient == null) {
+      solrClient = cloudClientProvider.getProvidedClient();
+      // try until we get a client that DOES have a zkStateReader
+      try {
+        solrClient.getZkStateReader();
+      } catch ( IllegalStateException e) {
+        // got a direct to leader client that has no zkStateReader, try again
+        solrClient = null;
+      }
+    }
     httpClient = (CloseableHttpClient) solrClient.getHttpClient();
 
     // here we make sure we have a clean working environment. Delete at front so that failing tests
@@ -92,7 +123,15 @@ public class RoutedAliasTestCase extends SolrCloudTestCase {
     }
   }
 
-  interface CloudSolrClientProvider {
+  interface CloudSolrClientProvider extends Closeable {
+    /**
+     * Provide a client. This method must provide a Cloud capable client at least occasionally. It is
+     * acceptable to sometimes provide (randomized) clients that include clients with no zkStateReader
+     * so long as there is a non-zero frequency with which a cloud capable client will be returned if this
+     * method is invoked repeatedly.
+     *
+     * @return a client tha can be used in tests.
+     */
     CloudSolrClient getProvidedClient();
 
     /**
@@ -101,6 +140,26 @@ public class RoutedAliasTestCase extends SolrCloudTestCase {
     default boolean iKnowThisTestDeletesTheEntireCluster() {
       return false;
     }
+
+    /**
+     * The provider must retain a handle to and be ready to close any clients distributed.
+     */
+    default void close(){
+      for (CloudSolrClient cloudSolrClient : getClients()) {
+        try {
+          cloudSolrClient.close();
+        } catch (IOException e) {
+          log.warn("Unable to close client!", e);
+        }
+      }
+    }
+
+    /**
+     * All the clients that have been distributed by {@link #getProvidedClient()}.
+     *
+     * @return a <tt>Set</tt> of provided clients
+     */
+    Set<CloudSolrClient> getClients();
   }
 
 }
