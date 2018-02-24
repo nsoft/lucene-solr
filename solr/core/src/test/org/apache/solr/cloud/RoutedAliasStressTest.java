@@ -22,9 +22,12 @@ import java.lang.invoke.MethodHandles;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -76,7 +79,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
 //          synchronized (this) {
 //            tmpClient = client;
 //            if (tmpClient == null)
-//            tmpClient = client = new CloudSolrClient.Builder().withZkHost("localhost:2181").withZkChroot("/solr__home_gus_clients_ds_tp_built_2017-12-29").build();
+//            tmpClient = client = new CloudSolrClient.Builder().withZkHost("localhost:2181").withZkChroot("/solr__home_gus").build();
 //          }
 //        }
 //        return tmpClient;
@@ -113,8 +116,18 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     CollectionAdminRequest.Create template = CollectionAdminRequest.createCollection("ignored", "_default", 2, 2);
     CloudSolrClient providedClient = cloudClientProvider.getProvidedClient();
     providedClient.setDefaultCollection(getTestName());
+
+    // create the alias to start one interval AFTER we start all our threads sending.
+    // This ensures that at least one thread is going to be failing with documents before
+    // the start time
+
+    StringBuilder builder = new StringBuilder();
+    for (int i = 0; i < INTERVALS; i++) {
+      builder.append(INTERVAL_DURATION);
+    }
+    String deleteAgeMath = builder.toString().replaceAll("\\+", "-");
     CollectionAdminRequest.createTimeRoutedAlias(getTestName(),
-        "NOW/MINUTE+1MINUTE+10SECOND", INTERVAL_DURATION, "time_dt", template)
+        "NOW/MINUTE+1MINUTE"+INTERVAL_DURATION, INTERVAL_DURATION, "time_dt", template, deleteAgeMath)
         .process(providedClient);
 
     Thread[] testerThreads = new Thread[TOTAL_THREADS];
@@ -179,6 +192,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
       throw e;
     }
     allComplete.await();
+    long finished = System.currentTimeMillis();
     timeoutThread.interrupt(); // will cause timeout thread to complete so it doesn't linger
     timeoutThread.join();      // wait for said completion
 
@@ -198,6 +212,10 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     }
     System.out.println(successCount);
     assertTrue(successCount > 0);
+
+    CloudSolrClient csc = ensureCloudClient(null);
+
+
 
     // TODO: make sure set of collections is as expected (some should have been deleted)
 

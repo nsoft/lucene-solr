@@ -138,7 +138,7 @@ public class TimeRoutedAliasUpdateProcessorTest extends SolrCloudTestCase {
 
     CollectionAdminRequest.createTimeRoutedAlias(alias, "2017-10-23T00:00:00Z", "+1DAY", timeField,
         CollectionAdminRequest.createCollection("_unused_", configName, 1, 1)
-            .setMaxShardsPerNode(2))
+            .setMaxShardsPerNode(2), null)
         .process(solrClient);
 
     // now we index a document

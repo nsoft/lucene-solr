@@ -91,16 +91,7 @@ public class RoutedAliasTestCase extends SolrCloudTestCase {
       return;
     }
 
-    while (solrClient == null) {
-      solrClient = cloudClientProvider.getProvidedClient();
-      // try until we get a client that DOES have a zkStateReader
-      try {
-        solrClient.getZkStateReader();
-      } catch ( IllegalStateException e) {
-        // got a direct to leader client that has no zkStateReader, try again
-        solrClient = null;
-      }
-    }
+    solrClient = ensureCloudClient(solrClient);
     httpClient = (CloseableHttpClient) solrClient.getHttpClient();
 
     // here we make sure we have a clean working environment. Delete at front so that failing tests
@@ -121,6 +112,29 @@ public class RoutedAliasTestCase extends SolrCloudTestCase {
     for (String collection : collections) {
       CollectionAdminRequest.deleteCollection(collection).process(solrClient);
     }
+  }
+
+  protected CloudSolrClient ensureCloudClient(CloudSolrClient solrClient) {
+    if (solrClient== null) {
+      solrClient = cloudClientProvider.getProvidedClient();
+    }
+    int attempts = 0;
+    ZkStateReader zkStateReader = null;
+    do {
+      attempts++;
+      // try until we get a client that DOES have a zkStateReader
+      try {
+        zkStateReader = solrClient.getZkStateReader();
+      } catch ( IllegalStateException e) {
+        // got a direct to leader client that has no zkStateReader, try again
+        if (attempts > 1000) {
+          fail("Your provider does not appear to reliably produce a cloud capable client within 1000 requests");
+        }
+        solrClient = cloudClientProvider.getProvidedClient();
+      }
+    } while  (zkStateReader == null);
+
+    return solrClient;
   }
 
   interface CloudSolrClientProvider extends Closeable {

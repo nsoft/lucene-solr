@@ -200,8 +200,9 @@ public class CreateRoutedAliasTest extends RoutedAliasTestCase {
           "2018-01-15T00:00:00Z",
           "+30MINUTE",
           "evt_dt",
-          CollectionAdminRequest.createCollection("_ignored_", "_default", 1, 1)
-          )
+          CollectionAdminRequest.createCollection("_ignored_", "_default", 1, 1),
+          null
+      )
           .setTimeZone(TimeZone.getTimeZone("GMT-10"))
           .process(client);
     }

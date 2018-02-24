@@ -1403,13 +1403,16 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse> 
    * @param interval date math representing the time duration of each collection (e.g. {@code +1DAY})
    * @param routerField the document field to contain the timestamp to route on
    * @param createCollTemplate Holds options to create a collection.  The "name" is ignored.
+   * @param deleteAgeMath
    */
-  public static CreateTimeRoutedAlias createTimeRoutedAlias(String aliasName, String start,
+  public static CreateTimeRoutedAlias createTimeRoutedAlias(String aliasName,
+                                                            String start,
                                                             String interval,
                                                             String routerField,
-                                                            Create createCollTemplate) {
+                                                            Create createCollTemplate,
+                                                            String deleteAgeMath) {
 
-    return new CreateTimeRoutedAlias(aliasName, routerField, start, interval, createCollTemplate);
+    return new CreateTimeRoutedAlias(aliasName, routerField, start, interval, deleteAgeMath, createCollTemplate);
   }
 
   public static class CreateTimeRoutedAlias extends AsyncCollectionAdminRequest {
@@ -1417,11 +1420,13 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse> 
     // to allow this stuff not to be duplicated. (this is pasted from CreateAliasCmd.java), however I think
     // a comprehensive cleanup of this for all the requests in this class should be done as a separate ticket.
 
-    public static final String ROUTER_TYPE_NAME = "router.name";
-    public static final String ROUTER_FIELD = "router.field";
-    public static final String ROUTER_START = "router.start";
-    public static final String ROUTER_INTERVAL = "router.interval";
-    public static final String ROUTER_MAX_FUTURE = "router.maxFutureMs";
+    public static final String PREFIX = "router.";
+    public static final String ROUTER_TYPE_NAME = PREFIX + "name";
+    public static final String ROUTER_FIELD = PREFIX + "field";
+    public static final String ROUTER_START = PREFIX + "start";
+    public static final String ROUTER_INTERVAL = PREFIX + "interval";
+    public static final String ROUTER_MAX_FUTURE = PREFIX + "maxFutureMs";
+    public static final String ROUTER_AUTO_DELETE_AGE = PREFIX + "autoDeleteAge";
 
     private final String aliasName;
     private final String routerField;
@@ -1430,15 +1435,17 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse> 
     //Optional:
     private TimeZone tz;
     private Integer maxFutureMs;
+    private String deleteAgeMath;
 
     private final Create createCollTemplate;
 
-    public CreateTimeRoutedAlias(String aliasName, String routerField, String start, String interval, Create createCollTemplate) {
+    public CreateTimeRoutedAlias(String aliasName, String routerField, String start, String interval, String deleteAgeMath, Create createCollTemplate) {
       super(CollectionAction.CREATEROUTEDALIAS);
       this.aliasName = aliasName;
       this.start = start;
       this.interval = interval;
       this.routerField = routerField;
+      this.deleteAgeMath = deleteAgeMath;
       this.createCollTemplate = createCollTemplate;
     }
 
@@ -1467,6 +1474,9 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse> 
       }
       if (maxFutureMs != null) {
         params.add(ROUTER_MAX_FUTURE, ""+maxFutureMs);
+      }
+      if (deleteAgeMath != null) {
+        params.add(ROUTER_AUTO_DELETE_AGE, deleteAgeMath);
       }
 
       // merge the above with collectionParams.  Above takes precedence.

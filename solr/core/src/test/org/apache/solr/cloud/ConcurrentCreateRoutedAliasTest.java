@@ -194,7 +194,8 @@ public class ConcurrentCreateRoutedAliasTest extends SolrTestCaseJ4 {
                 start,
                 "+12HOUR",
                 "routedFoo_dt",
-                CollectionAdminRequest.createCollection("_ignored_", "_default", 1, 1)
+                CollectionAdminRequest.createCollection("_ignored_", "_default", 1, 1),
+                null
             );
 
         final CollectionAdminResponse response = rq.process(solrClient);
