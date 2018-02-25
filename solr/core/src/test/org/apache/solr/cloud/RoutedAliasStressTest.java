@@ -203,6 +203,18 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     // not sure this is needed...
     Thread.sleep(5000);
 
+    // print all errors
+    for (IntervalTester tester : testers) {
+      if (tester.fail != null) {
+        log.error("TEST WILL FAIL: got {} in {}" + tester.fail, tester);
+      }
+    }
+    // then fail out on the first one
+    for (IntervalTester tester : testers) {
+      if (tester.fail != null) {
+        throw tester.fail;
+      }
+    }
     int successCount = 0;
     for (IntervalTester tester : testers) {
       tester.assertContiguousSuccess();
@@ -214,7 +226,6 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     assertTrue(successCount > 0);
 
     CloudSolrClient csc = ensureCloudClient(null);
-
 
 
     // TODO: make sure set of collections is as expected (some should have been deleted)
@@ -245,6 +256,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     private Instant stop;
     private int batchSize;
     private int testerNum = instanceNum.incrementAndGet();
+    private AssertionError fail;
 
     private LinkedHashMap<Long, Boolean> results = new LinkedHashMap<>();
     private LinkedHashMap<Long, Throwable> errors = new LinkedHashMap<>();
@@ -267,42 +279,41 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
           Thread.sleep(100);
         }
         log.info("ACTIVE: {}", this);
+        int lastStatus = -1;
         while (stop.isAfter(Instant.now())) {
           List<SolrInputDocument> docs = new ArrayList<>(batchSize);
           for (int i = 0; i < batchSize; i++) {
             docs.add(generator.nextDoc());
           }
           Thread.sleep(interBatchPause);
+          SolrInputDocument doc = docs.get(0);
           try {
             UpdateResponse add = cloudSolrClient.add(docs);
             int status = add.getStatus();
-            // todo: we can be smarter here and store just the transitions from success to failure rather
-            // than every success/fail which can cause memory probs when the batch delay is reduced
-            if (status == 0) {
-              for (SolrInputDocument doc : docs) {
-                log.info("success for {} in {}", doc, this );
-                results.put((Long) doc.get("id").getFirstValue(), true);
-              }
-            } else {
-              log.info(add.getResponseHeader().toString());
-              for (SolrInputDocument doc : docs) {
-                results.put((Long) doc.get("id").getFirstValue(), false);
-              }
+            if (lastStatus != status) {
+              log.info("success for {} in {}", doc, this );
+              results.put((Long) doc.get("id").getFirstValue(), true);
+              lastStatus = status;
             }
-
           } catch (SolrServerException | SolrException | IOException e) {
             if (!e.getMessage().contains("couldn't be routed")) {  // that exception is expected for docs out of range
-              log.info("EXCEPTION:", e);
+              fail("unexpected server side exception: " + e.getMessage());
             }
-            for (SolrInputDocument doc : docs) {
+            if ((e instanceof SolrException)) {
               results.put((Long) doc.get("id").getFirstValue(), false);
               errors.put((Long) doc.get("id").getFirstValue(), e);
+              lastStatus = ((SolrException)e).code();
+            } else {
+              fail("client side exception: " + e.getMessage() + " in thread " + this);
             }
           }
         }
       } catch (InterruptedException e) {
         errors.put(Long.MAX_VALUE, e);
-        e.printStackTrace();
+      } catch (AssertionError e) {
+        // once we fail something, we just want to record it and stop creating useless log spam that will hide
+        // the problem...
+        fail = e;
       }
     }
 
@@ -340,6 +351,10 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
           ", batchSize=" + batchSize +
           ", testerNum=" + testerNum +
           '}';
+    }
+
+    public AssertionError getFail() {
+      return fail;
     }
   }
 
