@@ -166,8 +166,8 @@ public class TimeRoutedAliasUpdateProcessor extends UpdateRequestProcessor {
       targetCollection = findTargetCollectionGivenTimestamp(routeTimestamp);
 
       if (targetCollection == null) {
-        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-            "Doc " + cmd.getPrintableId() + " couldn't be routed with " + timeRoutedAlias.getRouteField() + "=" + routeTimestamp);
+        throw new RouteNotFoundException("Doc " + cmd.getPrintableId() + " couldn't be routed with " +
+            timeRoutedAlias.getRouteField() + "=" + routeTimestamp);
       }
 
       // Note: the following rule is tempting but not necessary and is not compatible with
@@ -381,6 +381,19 @@ public class TimeRoutedAliasUpdateProcessor extends UpdateRequestProcessor {
     }
     return new SolrCmdDistributor.RetryNode(new ZkCoreNodeProps(leader), zkController.getZkStateReader(),
         collection, null);
+  }
+
+  /**
+   * Exception to send in the case that the request was ill timed but otherwise valid. This case is something
+   * the user may well want to handle differently from other server side errors, so we should provide a
+   * an exception class so they don't have to parse our exception message to identify it.
+   */
+  public static class RouteNotFoundException extends SolrException {
+    // todo: boolean attribute to indicate if it was too far in the future, or too far in the past?
+
+    public RouteNotFoundException(String message) {
+      super(ErrorCode.BAD_REQUEST, message);
+    }
   }
 
 }

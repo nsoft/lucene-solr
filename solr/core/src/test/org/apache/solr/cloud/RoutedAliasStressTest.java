@@ -27,6 +27,7 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,10 +38,12 @@ import com.google.common.collect.ListMultimap;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
+import org.apache.solr.client.solrj.impl.HttpSolrClient;
 import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.response.UpdateResponse;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrInputDocument;
+import org.apache.solr.update.processor.TimeRoutedAliasUpdateProcessor;
 import org.apache.solr.util.DateMathParser;
 import org.junit.After;
 import org.junit.Before;
@@ -127,7 +130,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     }
     String deleteAgeMath = builder.toString().replaceAll("\\+", "-");
     CollectionAdminRequest.createTimeRoutedAlias(getTestName(),
-        "NOW/MINUTE+1MINUTE"+INTERVAL_DURATION, INTERVAL_DURATION, "time_dt", template, deleteAgeMath)
+        "NOW/MINUTE+1MINUTE" + INTERVAL_DURATION, INTERVAL_DURATION, "time_dt", template, deleteAgeMath)
         .process(providedClient);
 
     Thread[] testerThreads = new Thread[TOTAL_THREADS];
@@ -135,7 +138,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     DateMathParser parser = new DateMathParser();
 
     // wait a minute to get things settled, make sure all is started up
-    Instant beginningAt = DateMathParser.parseMath(new Date(),"NOW/MINUTE+1MINUTE").toInstant();
+    Instant beginningAt = DateMathParser.parseMath(new Date(), "NOW/MINUTE+1MINUTE").toInstant();
 
     Instant[] timesForTesters = new Instant[INTERVALS * 2 + 1];
     Instant temp = beginningAt;
@@ -152,7 +155,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     // also used to ensure all threads are interrupted and complete at end of test...
     Thread timeoutThread = new Thread(() -> {
       try {
-        Thread.sleep( INTERVALS * 60 * 1000); // assuming test should take no more than 1 min per interval
+        Thread.sleep(INTERVALS * 60 * 1000); // assuming test should take no more than 1 min per interval
       } catch (InterruptedException e) {
         // all good, no worries
       }
@@ -184,7 +187,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
         testerThreads[i].setDaemon(true);
         testerThreads[i].start();
       }
-    } catch (Exception e){
+    } catch (Exception e) {
       // ensure that the threads don't run long even if there's a bug. This should hopefully avoid issues with
       // stuck threads causing errors with test infrastructure thread tracking by ensuring all threads complete;
       timeoutThread.interrupt();
@@ -291,18 +294,21 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
             UpdateResponse add = cloudSolrClient.add(docs);
             int status = add.getStatus();
             if (lastStatus != status) {
-              log.info("success for {} in {}", doc, this );
+              log.info("success for {} in {}", doc, this);
               results.put((Long) doc.get("id").getFirstValue(), true);
               lastStatus = status;
             }
           } catch (SolrServerException | SolrException | IOException e) {
-            if (!e.getMessage().contains("couldn't be routed")) {  // that exception is expected for docs out of range
+            if (!isRoutingException(e)) {  // that exception is expected for docs out of range
               fail("unexpected server side exception: " + e.getMessage());
             }
             if ((e instanceof SolrException)) {
-              results.put((Long) doc.get("id").getFirstValue(), false);
-              errors.put((Long) doc.get("id").getFirstValue(), e);
-              lastStatus = ((SolrException)e).code();
+              SolrException se = (SolrException) e;
+              if (lastStatus != se.code()) {
+                results.put((Long) doc.get("id").getFirstValue(), false);
+                errors.put((Long) doc.get("id").getFirstValue(), e);
+                lastStatus = se.code();
+              }
             } else {
               fail("client side exception: " + e.getMessage() + " in thread " + this);
             }
@@ -315,6 +321,38 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
         // the problem...
         fail = e;
       }
+    }
+
+    // This is more complicated than I had hoped it would be. This should possibly generalized to be a utlity in solrj
+    private boolean isRoutingException(Throwable e) {
+        if (e instanceof TimeRoutedAliasUpdateProcessor.RouteNotFoundException) {
+          return true;
+        } else {
+          if (e.getCause() != null && e.getCause() != e) {
+            if (isRoutingException(e.getCause())) {
+              return true;
+            }
+          }
+          // and now handle our exceptions that don't have a "cause" set...
+          if (e instanceof HttpSolrClient.RemoteSolrException) {
+            String clazz = ((HttpSolrClient.RemoteSolrException) e).getMetadata("root-error-class");
+            try {
+              if (Class.forName(clazz) == TimeRoutedAliasUpdateProcessor.RouteNotFoundException.class) {
+                return true;
+              }
+            } catch (ClassNotFoundException e1) {
+              // ignore
+            }
+          }
+          if (e instanceof CloudSolrClient.RouteException) {
+            for (Map.Entry<String, Throwable> stringThrowableEntry : ((CloudSolrClient.RouteException) e).getThrowables()) {
+              if (isRoutingException(stringThrowableEntry.getValue())) {
+                return true;
+              }
+            }
+          }
+        }
+      return false;
     }
 
     void assertContiguousSuccess() {
