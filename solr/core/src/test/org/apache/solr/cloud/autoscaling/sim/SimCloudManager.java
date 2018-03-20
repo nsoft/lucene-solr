@@ -39,9 +39,9 @@ import org.apache.solr.client.solrj.SolrRequest;
 import org.apache.solr.client.solrj.SolrResponse;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.cloud.DistributedQueueFactory;
-import org.apache.solr.client.solrj.cloud.autoscaling.DistribStateManager;
-import org.apache.solr.client.solrj.cloud.autoscaling.NodeStateProvider;
-import org.apache.solr.client.solrj.cloud.autoscaling.SolrCloudManager;
+import org.apache.solr.client.solrj.cloud.DistribStateManager;
+import org.apache.solr.client.solrj.cloud.NodeStateProvider;
+import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.client.solrj.impl.ClusterStateProvider;
 import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.request.RequestWriter;
@@ -496,6 +496,7 @@ public class SimCloudManager implements SolrCloudManager {
       SolrQueryResponse queryResponse = new SolrQueryResponse();
       autoScalingHandler.handleRequest(queryRequest, queryResponse);
       if (queryResponse.getException() != null) {
+        LOG.debug("-- exception handling request", queryResponse.getException());
         throw new IOException(queryResponse.getException());
       }
       SolrResponse rsp = new SolrResponseBase();
@@ -604,6 +605,13 @@ public class SimCloudManager implements SolrCloudManager {
         case SPLITSHARD:
           try {
             clusterStateProvider.simSplitShard(new ZkNodeProps(req.getParams().toNamedList().asMap(10)), results);
+          } catch (Exception e) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+          }
+          break;
+        case DELETESHARD:
+          try {
+            clusterStateProvider.simDeleteShard(new ZkNodeProps(req.getParams().toNamedList().asMap(10)), results);
           } catch (Exception e) {
             throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
           }

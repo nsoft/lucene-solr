@@ -28,7 +28,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
@@ -50,7 +49,6 @@ import org.apache.solr.cloud.OverseerTaskQueue;
 import org.apache.solr.cloud.OverseerTaskQueue.QueueEvent;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.cloud.ZkShardTerms;
-import org.apache.solr.cloud.api.collections.OverseerCollectionMessageHandler;
 import org.apache.solr.cloud.overseer.SliceMutator;
 import org.apache.solr.cloud.rule.ReplicaAssigner;
 import org.apache.solr.cloud.rule.Rule;
@@ -59,6 +57,7 @@ import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.cloud.Aliases;
 import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.cloud.ClusterState;
+import org.apache.solr.common.cloud.CollectionProperties;
 import org.apache.solr.common.cloud.DocCollection;
 import org.apache.solr.common.cloud.ImplicitDocRouter;
 import org.apache.solr.common.cloud.Replica;
@@ -73,9 +72,7 @@ import org.apache.solr.common.params.AutoScalingParams;
 import org.apache.solr.common.params.CollectionAdminParams;
 import org.apache.solr.common.params.CollectionParams;
 import org.apache.solr.common.params.CollectionParams.CollectionAction;
-import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.CoreAdminParams;
-import org.apache.solr.common.params.CoreAdminParams.CoreAdminAction;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.NamedList;
@@ -87,7 +84,6 @@ import org.apache.solr.core.backup.repository.BackupRepository;
 import org.apache.solr.core.snapshots.CollectionSnapshotMetaData;
 import org.apache.solr.core.snapshots.SolrSnapshotManager;
 import org.apache.solr.handler.RequestHandlerBase;
-import org.apache.solr.handler.component.ShardHandler;
 import org.apache.solr.request.LocalSolrQueryRequest;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
@@ -137,6 +133,8 @@ import static org.apache.solr.common.cloud.ZkStateReader.REPLICA_TYPE;
 import static org.apache.solr.common.cloud.ZkStateReader.SHARD_ID_PROP;
 import static org.apache.solr.common.cloud.ZkStateReader.TLOG_REPLICAS;
 import static org.apache.solr.common.params.CollectionAdminParams.COUNT_PROP;
+import static org.apache.solr.common.params.CollectionAdminParams.PROPERTY_NAME;
+import static org.apache.solr.common.params.CollectionAdminParams.PROPERTY_VALUE;
 import static org.apache.solr.common.params.CollectionParams.CollectionAction.*;
 import static org.apache.solr.common.params.CommonAdminParams.ASYNC;
 import static org.apache.solr.common.params.CommonAdminParams.IN_PLACE_MOVE;
@@ -521,21 +519,27 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
     }),
 
     CREATEALIAS_OP(CREATEALIAS, (req, rsp, h) -> {
-      SolrIdentifierValidator.validateAliasName(req.getParams().get(NAME));
-      return req.getParams().required().getAll(null, NAME, "collections");
-    }),
-
-    CREATEROUTEDALIAS_OP(CREATEROUTEDALIAS, (req, rsp, h) -> {
       String alias = req.getParams().get(NAME);
       SolrIdentifierValidator.validateAliasName(alias);
-      Map<String, Object> result = req.getParams().required().getAll(null, REQUIRED_ROUTER_PARAMS);
+      String collections = req.getParams().get("collections");
+      Map<String, Object> result = req.getParams().getAll(null, REQUIRED_ROUTER_PARAMS);
       req.getParams().getAll(result, OPTIONAL_ROUTER_PARAMS);
+      if (collections != null) {
+        if (result.size() > 1) { // (NAME should be there, and if it's not we will fail below)
+          throw new SolrException(BAD_REQUEST, "Collections cannot be specified when creating a time routed alias.");
+        }
+        // regular alias creation...
+        return req.getParams().required().getAll(null, NAME, "collections");
+      }
 
+      // Ok so we are creating a time routed alias from here
+
+      // for validation....
+      req.getParams().required().getAll(null, REQUIRED_ROUTER_PARAMS);
       ModifiableSolrParams createCollParams = new ModifiableSolrParams(); // without prefix
 
       // add to result params that start with "create-collection.".
       //   Additionally, save these without the prefix to createCollParams
-
       forEach(req.getParams(), (p, v) -> {
           if (p.startsWith(CREATE_COLLECTION_PREFIX)) {
             // This is what SolrParams#getAll(Map, Collection)} does
@@ -567,18 +571,18 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
     DELETEALIAS_OP(DELETEALIAS, (req, rsp, h) -> req.getParams().required().getAll(null, NAME)),
 
     /**
-     * Change metadata for an alias (use CREATEALIAS_OP to change the actual value of the alias)
+     * Change properties for an alias (use CREATEALIAS_OP to change the actual value of the alias)
      */
-    MODIFYALIAS_OP(MODIFYALIAS, (req, rsp, h) -> {
+    ALIASPROP_OP(ALIASPROP, (req, rsp, h) -> {
       Map<String, Object> params = req.getParams().required().getAll(null, NAME);
 
-      // Note: success/no-op in the event of no metadata supplied is intentional. Keeps code simple and one less case
+      // Note: success/no-op in the event of no properties supplied is intentional. Keeps code simple and one less case
       // for api-callers to check for.
-      return convertPrefixToMap(req.getParams(), params, "metadata");
+      return convertPrefixToMap(req.getParams(), params, "property");
     }),
 
     /**
-     * List the aliases and associated metadata.
+     * List the aliases and associated properties.
      */
     LISTALIASES_OP(LISTALIASES, (req, rsp, h) -> {
       ZkStateReader zkStateReader = h.coreContainer.getZkController().getZkStateReader();
@@ -586,15 +590,15 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
       if (aliases != null) {
         // the aliases themselves...
         rsp.getValues().add("aliases", aliases.getCollectionAliasMap());
-        // Any metadata for the above aliases.
+        // Any properties for the above aliases.
         Map<String,Map<String,String>> meta = new LinkedHashMap<>();
         for (String alias : aliases.getCollectionAliasListMap().keySet()) {
-          Map<String, String> collectionAliasMetadata = aliases.getCollectionAliasMetadata(alias);
-          if (collectionAliasMetadata != null) {
-            meta.put(alias, collectionAliasMetadata);
+          Map<String, String> collectionAliasProperties = aliases.getCollectionAliasProperties(alias);
+          if (collectionAliasProperties != null) {
+            meta.put(alias, collectionAliasProperties);
           }
         }
-        rsp.getValues().add("metadata", meta);
+        rsp.getValues().add("properties", meta);
       }
       return null;
     }),
@@ -686,6 +690,14 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
       String val = req.getParams().get(VALUE_LONG);
       ClusterProperties cp = new ClusterProperties(h.coreContainer.getZkController().getZkClient());
       cp.setClusterProperty(name, val);
+      return null;
+    }),
+    COLLECTIONPROP_OP(COLLECTIONPROP, (req, rsp, h) -> {
+      String collection = req.getParams().required().get(NAME);
+      String name = req.getParams().required().get(PROPERTY_NAME);
+      String val = req.getParams().get(PROPERTY_VALUE);
+      CollectionProperties cp = new CollectionProperties(h.coreContainer.getZkController().getZkClient());
+      cp.setCollectionProperty(collection, name, val);
       return null;
     }),
     REQUESTSTATUS_OP(REQUESTSTATUS, (req, rsp, h) -> {
@@ -1141,30 +1153,10 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
           .noneMatch(rep -> zkShardTerms.registered(rep.getName()) && zkShardTerms.canBecomeLeader(rep.getName()));
       // we won't increase replica's terms if exist a live replica with term equals to leader
       if (shouldIncreaseReplicaTerms) {
-        OptionalLong optionalMaxTerm = liveReplicas.stream()
+        //TODO only increase terms of replicas less out-of-sync
+        liveReplicas.stream()
             .filter(rep -> zkShardTerms.registered(rep.getName()))
-            .mapToLong(rep -> zkShardTerms.getTerm(rep.getName()))
-            .max();
-        // increase terms of replicas less out-of-sync
-        if (optionalMaxTerm.isPresent()) {
-          liveReplicas.stream()
-              .filter(rep -> zkShardTerms.getTerm(rep.getName()) == optionalMaxTerm.getAsLong())
-              .forEach(rep -> zkShardTerms.setEqualsToMax(rep.getName()));
-        }
-      }
-
-      // Call all live replicas to prepare themselves for leadership, e.g. set last published
-      // state to active.
-      for (Replica rep : liveReplicas) {
-        ShardHandler shardHandler = handler.coreContainer.getShardHandlerFactory().getShardHandler();
-
-        ModifiableSolrParams params = new ModifiableSolrParams();
-        params.set(CoreAdminParams.ACTION, CoreAdminAction.FORCEPREPAREFORLEADERSHIP.toString());
-        params.set(CoreAdminParams.CORE, rep.getStr("core"));
-        String nodeName = rep.getNodeName();
-
-        OverseerCollectionMessageHandler.sendShardRequest(nodeName, params, shardHandler, null, null,
-            CommonParams.CORES_HANDLER_PATH, handler.coreContainer.getZkController().getZkStateReader()); // synchronous request
+            .forEach(rep -> zkShardTerms.setTermEqualsToLeader(rep.getName()));
       }
 
       // Wait till we have an active leader

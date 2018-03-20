@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.apache.solr.client.solrj.cloud.autoscaling.Policy;
-import org.apache.solr.client.solrj.cloud.autoscaling.SolrCloudManager;
+import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.client.solrj.cloud.autoscaling.Suggester;
 import org.apache.solr.client.solrj.cloud.autoscaling.TriggerEventType;
 import org.apache.solr.common.SolrException;
@@ -144,7 +144,7 @@ public class MetricTrigger extends TriggerBase {
       values.forEach((tag, rate) -> rates.computeIfAbsent(node, s -> (Number) rate));
     }
 
-    long now = cloudManager.getTimeSource().getTime();
+    long now = cloudManager.getTimeSource().getTimeNs();
     // check for exceeded rates and filter out those with less than waitFor from previous events
     Map<String, Number> hotNodes = rates.entrySet().stream()
         .filter(entry -> waitForElapsed(entry.getKey(), now, lastNodeEvent))

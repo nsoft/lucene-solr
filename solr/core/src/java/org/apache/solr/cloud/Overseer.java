@@ -27,7 +27,7 @@ import java.util.Map;
 import java.util.Set;
 
 import com.codahale.metrics.Timer;
-import org.apache.solr.client.solrj.cloud.autoscaling.SolrCloudManager;
+import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.client.solrj.impl.ClusterStateProvider;
 import org.apache.solr.cloud.api.collections.OverseerCollectionMessageHandler;
 import org.apache.solr.cloud.autoscaling.OverseerTriggerThread;
@@ -70,7 +70,7 @@ public class Overseer implements SolrCloseable {
   public static final String QUEUE_OPERATION = "operation";
 
   // System properties are used in tests to make them run fast
-  public static final int STATE_UPDATE_DELAY = Integer.getInteger("solr.OverseerStateUpdateDelay", 2000);  // delay between cloud state updates
+  public static final int STATE_UPDATE_DELAY = ZkStateReader.STATE_UPDATE_DELAY;
   public static final int STATE_UPDATE_BATCH_SIZE = Integer.getInteger("solr.OverseerStateUpdateBatchSize", 10000);
   public static final int STATE_UPDATE_MAX_QUEUE = 20000;
 

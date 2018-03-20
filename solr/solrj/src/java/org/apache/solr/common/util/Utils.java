@@ -23,6 +23,7 @@ import java.io.Reader;
 import java.io.StringReader;
 import java.io.UnsupportedEncodingException;
 import java.lang.invoke.MethodHandles;
+import java.net.URL;
 import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -43,7 +44,7 @@ import java.util.regex.Pattern;
 
 import org.apache.http.HttpEntity;
 import org.apache.http.util.EntityUtils;
-import org.apache.solr.client.solrj.cloud.autoscaling.DistribStateManager;
+import org.apache.solr.client.solrj.cloud.DistribStateManager;
 import org.apache.solr.client.solrj.cloud.autoscaling.VersionedData;
 import org.apache.solr.client.solrj.impl.BinaryRequestWriter;
 import org.apache.solr.common.IteratorWriter;
@@ -200,9 +201,17 @@ public class Utils {
     }
   }
 
-  public static Object fromJSONResource(String resourceName){
-   return fromJSON(Utils.class.getClassLoader().getResourceAsStream(resourceName));
-
+  public static Object fromJSONResource(String resourceName) {
+    final URL resource = Utils.class.getClassLoader().getResource(resourceName);
+    if (null == resource) {
+      throw new IllegalArgumentException("invalid resource name: " + resourceName);
+    }
+    try (InputStream stream = resource.openStream()) {
+      return fromJSON(stream);
+    } catch (IOException e) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+                              "Resource error: " + e.getMessage(), e);
+    }
   }
   public static JSONParser getJSONParser(Reader reader){
     JSONParser parser = new JSONParser(reader);
@@ -462,10 +471,10 @@ public class Utils {
   }
 
   public static long time(TimeSource timeSource, TimeUnit unit) {
-    return unit.convert(timeSource.getTime(), TimeUnit.NANOSECONDS);
+    return unit.convert(timeSource.getTimeNs(), TimeUnit.NANOSECONDS);
   }
 
   public static long timeElapsed(TimeSource timeSource, long start, TimeUnit unit) {
-    return unit.convert(timeSource.getTime() - NANOSECONDS.convert(start, unit), NANOSECONDS);
+    return unit.convert(timeSource.getTimeNs() - NANOSECONDS.convert(start, unit), NANOSECONDS);
   }
 }

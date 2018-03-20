@@ -36,6 +36,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.apache.lucene.analysis.Analyzer;
@@ -270,7 +271,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
   public final static int MAX_STORED_STRING_LENGTH = ArrayUtil.MAX_ARRAY_LENGTH / UnicodeUtil.MAX_UTF8_BYTES_PER_CHAR;
     
   // when unrecoverable disaster strikes, we populate this with the reason that we had to close IndexWriter
-  volatile Throwable tragedy;
+  final AtomicReference<Throwable> tragedy = new AtomicReference<>(null);
 
   private final Directory directoryOrig;       // original user directory
   final Directory directory;           // wrapped with additional checks
@@ -463,7 +464,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
             flushCount.incrementAndGet();
           }
 
-          processEvents(false, true);
+          processEvents(false);
 
           if (applyAllDeletes) {
             applyAllDeletesAndUpdates();
@@ -497,7 +498,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
           // Done: finish the full flush!
           docWriter.finishFullFlush(this, success);
           if (success) {
-            processEvents(false, true);
+            processEvents(false);
             doAfterFlush();
           } else {
             if (infoStream.isEnabled("IW")) {
@@ -514,13 +515,16 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         infoStream.message("IW", "getReader took " + (System.currentTimeMillis() - tStart) + " msec");
       }
       success2 = true;
-    } catch (AbortingException | VirtualMachineError tragedy) {
+    } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "getReader");
-      // never reached but javac disagrees:
-      return null;
+      throw tragedy;
     } finally {
       if (!success2) {
-        IOUtils.closeWhileHandlingException(r);
+        try {
+          IOUtils.closeWhileHandlingException(r);
+        } finally {
+          maybeCloseOnTragicEvent();
+        }
       }
     }
     return r;
@@ -742,10 +746,9 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
             checkpointNoSIS();
           }
         } catch (Throwable t) {
+          priorE = IOUtils.useOrSuppress(priorE, t);
           if (doSave) {
-            throw IOUtils.rethrowAlways(t);
-          } else if (priorE == null) {
-            priorE = t;
+            throw t;
           }
         }
 
@@ -762,10 +765,9 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         try {
           rld.dropReaders();
         } catch (Throwable t) {
+          priorE = IOUtils.useOrSuppress(priorE, t);
           if (doSave) {
-            throw IOUtils.rethrowAlways(t);
-          } else if (priorE == null) {
-            priorE = t;
+            throw t;
           }
         }
       }
@@ -894,7 +896,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
    */
   protected final void ensureOpen(boolean failIfClosing) throws AlreadyClosedException {
     if (closed || (failIfClosing && closing)) {
-      throw new AlreadyClosedException("this IndexWriter is closed", tragedy);
+      throw new AlreadyClosedException("this IndexWriter is closed", tragedy.get());
     }
   }
 
@@ -1263,7 +1265,6 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     // Ensure that only one thread actually gets to do the
     // closing
     if (shouldClose(true)) {
-      boolean success = false;
       try {
         if (infoStream.isEnabled("IW")) {
           infoStream.message("IW", "now flush at close");
@@ -1273,16 +1274,14 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         waitForMerges();
         commitInternal(config.getMergePolicy());
         rollbackInternal(); // ie close, since we just committed
-        success = true;
-      } finally {
-        if (success == false) {
-          // Be certain to close the index on any exception
-          try {
-            rollbackInternal();
-          } catch (Throwable t) {
-            // Suppress so we keep throwing original exception
-          }
+      } catch (Throwable t) {
+        // Be certain to close the index on any exception
+        try {
+          rollbackInternal();
+        } catch (Throwable t1) {
+          t.addSuppressed(t1);
         }
+        throw t;
       }
     }
   }
@@ -1459,7 +1458,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
    * @throws IOException if there is a low-level IO error
    */
   public long addDocument(Iterable<? extends IndexableField> doc) throws IOException {
-    return updateDocument(null, doc);
+    return updateDocument((DocumentsWriterDeleteQueue.Node<?>) null, doc);
   }
 
   /**
@@ -1503,7 +1502,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
    * @lucene.experimental
    */
   public long addDocuments(Iterable<? extends Iterable<? extends IndexableField>> docs) throws IOException {
-    return updateDocuments(null, docs);
+    return updateDocuments((DocumentsWriterDeleteQueue.Node<?>) null, docs);
   }
 
   /**
@@ -1523,30 +1522,74 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
    * @lucene.experimental
    */
   public long updateDocuments(Term delTerm, Iterable<? extends Iterable<? extends IndexableField>> docs) throws IOException {
-    ensureOpen();
-    try {
-      boolean success = false;
-      try {
-        long seqNo = docWriter.updateDocuments(docs, analyzer, delTerm);
-        if (seqNo < 0) {
-          seqNo = -seqNo;
-          processEvents(true, false);
-        }
-        success = true;
-        return seqNo;
-      } finally {
-        if (!success) {
-          if (infoStream.isEnabled("IW")) {
-            infoStream.message("IW", "hit exception updating document");
-          }
-        }
-      }
-    } catch (AbortingException | VirtualMachineError tragedy) {
-      tragicEvent(tragedy, "updateDocuments");
+    return updateDocuments(delTerm == null ? null : DocumentsWriterDeleteQueue.newNode(delTerm), docs);
+  }
 
-      // dead code but javac disagrees
-      return -1;
+  private long updateDocuments(final DocumentsWriterDeleteQueue.Node<?> delNode, Iterable<? extends Iterable<? extends IndexableField>> docs) throws IOException {
+    ensureOpen();
+    boolean success = false;
+    try {
+      long seqNo = docWriter.updateDocuments(docs, analyzer, delNode);
+      if (seqNo < 0) {
+        seqNo = -seqNo;
+        processEvents(true);
+      }
+      success = true;
+      return seqNo;
+    } catch (VirtualMachineError tragedy) {
+      tragicEvent(tragedy, "updateDocuments");
+      throw tragedy;
+    } finally {
+      if (success == false) {
+        if (infoStream.isEnabled("IW")) {
+          infoStream.message("IW", "hit exception updating document");
+        }
+        maybeCloseOnTragicEvent();
+      }
     }
+
+  }
+
+  /**
+   * Expert:
+   * Atomically updates documents matching the provided
+   * term with the given doc-values fields
+   * and adds a block of documents with sequentially
+   * assigned document IDs, such that an external reader
+   * will see all or none of the documents.
+   *
+   * One use of this API is to retain older versions of
+   * documents instead of replacing them. The existing
+   * documents can be updated to reflect they are no
+   * longer current while atomically adding new documents
+   * at the same time.
+   *
+   * In contrast to {@link #updateDocuments(Term, Iterable)}
+   * this method will not delete documents in the index
+   * matching the given term but instead update them with
+   * the given doc-values fields which can be used as a
+   * soft-delete mechanism.
+   *
+   * See {@link #addDocuments(Iterable)}
+   * and {@link #updateDocuments(Term, Iterable)}.
+   *
+   *
+   * @return The <a href="#sequence_number">sequence number</a>
+   * for this operation
+   *
+   * @throws CorruptIndexException if the index is corrupt
+   * @throws IOException if there is a low-level IO error
+   *
+   * @lucene.experimental
+   */
+  public long softUpdateDocuments(Term term, Iterable<? extends Iterable<? extends IndexableField>> docs, Field... softDeletes) throws IOException {
+    if (term == null) {
+      throw new IllegalArgumentException("term must not be null");
+    }
+    if (softDeletes == null || softDeletes.length == 0) {
+      throw new IllegalArgumentException("at least one soft delete must be present");
+    }
+    return updateDocuments(DocumentsWriterDeleteQueue.newNode(buildDocValuesUpdate(term, softDeletes, false)), docs);
   }
 
   /** Expert: attempts to delete by document ID, as long as
@@ -1654,14 +1697,12 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       long seqNo = docWriter.deleteTerms(terms);
       if (seqNo < 0) {
         seqNo = -seqNo;
-        processEvents(true, false);
+        processEvents(true);
       }
       return seqNo;
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "deleteDocuments(Term..)");
-
-      // dead code but javac disagrees:
-      return -1;
+      throw tragedy;
     }
   }
 
@@ -1691,15 +1732,13 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       long seqNo = docWriter.deleteQueries(queries);
       if (seqNo < 0) {
         seqNo = -seqNo;
-        processEvents(true, false);
+        processEvents(true);
       }
 
       return seqNo;
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "deleteDocuments(Query..)");
-
-      // dead code but javac disagrees:
-      return -1;
+      throw tragedy;
     }
   }
 
@@ -1720,31 +1759,77 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
    * @throws IOException if there is a low-level IO error
    */
   public long updateDocument(Term term, Iterable<? extends IndexableField> doc) throws IOException {
+    return updateDocument(term == null ? null : DocumentsWriterDeleteQueue.newNode(term), doc);
+  }
+
+  private long updateDocument(final DocumentsWriterDeleteQueue.Node<?> delNode,
+                              Iterable<? extends IndexableField> doc) throws IOException {
     ensureOpen();
+    boolean success = false;
     try {
-      boolean success = false;
-      try {
-        long seqNo = docWriter.updateDocument(doc, analyzer, term);
-        if (seqNo < 0) {
-          seqNo = - seqNo;
-          processEvents(true, false);
-        }
-        success = true;
-        return seqNo;
-      } finally {
-        if (!success) {
-          if (infoStream.isEnabled("IW")) {
-            infoStream.message("IW", "hit exception updating document");
-          }
+      long seqNo = docWriter.updateDocument(doc, analyzer, delNode);
+      if (seqNo < 0) {
+        seqNo = -seqNo;
+        processEvents(true);
+      }
+      success = true;
+      return seqNo;
+    } catch (VirtualMachineError tragedy) {
+      tragicEvent(tragedy, "updateDocument");
+      throw tragedy;
+    } finally {
+      if (success == false) {
+        if (infoStream.isEnabled("IW")) {
+          infoStream.message("IW", "hit exception updating document");
         }
       }
-    } catch (AbortingException | VirtualMachineError tragedy) {
-      tragicEvent(tragedy, "updateDocument");
-
-      // dead code but javac disagrees:
-      return -1;
+      maybeCloseOnTragicEvent();
     }
   }
+
+
+  /**
+   * Expert:
+   * Updates a document by first updating the document(s)
+   * containing <code>term</code> with the given doc-values fields
+   * and then adding the new document.  The doc-values update and
+   * then add are atomic as seen by a reader on the same index
+   * (flush may happen only after the add).
+   *
+   * One use of this API is to retain older versions of
+   * documents instead of replacing them. The existing
+   * documents can be updated to reflect they are no
+   * longer current while atomically adding new documents
+   * at the same time.
+   *
+   * In contrast to {@link #updateDocument(Term, Iterable)}
+   * this method will not delete documents in the index
+   * matching the given term but instead update them with
+   * the given doc-values fields which can be used as a
+   * soft-delete mechanism.
+   *
+   * See {@link #addDocuments(Iterable)}
+   * and {@link #updateDocuments(Term, Iterable)}.
+   *
+   *
+   * @return The <a href="#sequence_number">sequence number</a>
+   * for this operation
+   *
+   * @throws CorruptIndexException if the index is corrupt
+   * @throws IOException if there is a low-level IO error
+   *
+   * @lucene.experimental
+   */
+  public long softUpdateDocument(Term term, Iterable<? extends IndexableField> doc, Field... softDeletes) throws IOException {
+    if (term == null) {
+      throw new IllegalArgumentException("term must not be null");
+    }
+    if (softDeletes == null || softDeletes.length == 0) {
+      throw new IllegalArgumentException("at least one soft delete must be present");
+    }
+    return updateDocument(DocumentsWriterDeleteQueue.newNode(buildDocValuesUpdate(term, softDeletes, false)), doc);
+  }
+
 
   /**
    * Updates a document's {@link NumericDocValues} for <code>field</code> to the
@@ -1778,14 +1863,12 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       long seqNo = docWriter.updateDocValues(new NumericDocValuesUpdate(term, field, value));
       if (seqNo < 0) {
         seqNo = -seqNo;
-        processEvents(true, false);
+        processEvents(true);
       }
       return seqNo;
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "updateNumericDocValue");
-
-      // dead code but javac disagrees:
-      return -1;
+      throw tragedy;
     }
   }
 
@@ -1825,14 +1908,12 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       long seqNo = docWriter.updateDocValues(new BinaryDocValuesUpdate(term, field, value));
       if (seqNo < 0) {
         seqNo = -seqNo;
-        processEvents(true, false);
+        processEvents(true);
       }
       return seqNo;
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "updateBinaryDocValue");
-
-      // dead code but javac disagrees:
-      return -1;
+      throw tragedy;
     }
   }
   
@@ -1855,6 +1936,21 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
    */
   public long updateDocValues(Term term, Field... updates) throws IOException {
     ensureOpen();
+    DocValuesUpdate[] dvUpdates = buildDocValuesUpdate(term, updates, true);
+    try {
+      long seqNo = docWriter.updateDocValues(dvUpdates);
+      if (seqNo < 0) {
+        seqNo = -seqNo;
+        processEvents(true);
+      }
+      return seqNo;
+    } catch (VirtualMachineError tragedy) {
+      tragicEvent(tragedy, "updateDocValues");
+      throw tragedy;
+    }
+  }
+
+  private DocValuesUpdate[] buildDocValuesUpdate(Term term, Field[] updates, boolean enforceFieldExistence) {
     DocValuesUpdate[] dvUpdates = new DocValuesUpdate[updates.length];
     for (int i = 0; i < updates.length; i++) {
       final Field f = updates[i];
@@ -1865,7 +1961,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       if (dvType == DocValuesType.NONE) {
         throw new IllegalArgumentException("can only update NUMERIC or BINARY fields! field=" + f.name());
       }
-      if (!globalFieldNumberMap.contains(f.name(), dvType)) {
+      if (enforceFieldExistence && !globalFieldNumberMap.contains(f.name(), dvType)) {
         throw new IllegalArgumentException("can only update existing docvalues fields! field=" + f.name() + ", type=" + dvType);
       }
       if (config.getIndexSortFields().contains(f.name())) {
@@ -1882,21 +1978,9 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
           throw new IllegalArgumentException("can only update NUMERIC or BINARY fields: field=" + f.name() + ", type=" + dvType);
       }
     }
-    try {
-      long seqNo = docWriter.updateDocValues(dvUpdates);
-      if (seqNo < 0) {
-        seqNo = -seqNo;
-        processEvents(true, false);
-      }
-      return seqNo;
-    } catch (VirtualMachineError tragedy) {
-      tragicEvent(tragedy, "updateDocValues");
-
-      // dead code but javac disagrees:
-      return -1;
-    }
+    return dvUpdates;
   }
-  
+
   // for test purpose
   final synchronized int getSegmentCount(){
     return segmentInfos.size();
@@ -2081,8 +2165,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       synchronized(this) {
         while(true) {
 
-          if (tragedy != null) {
-            throw new IllegalStateException("this writer hit an unrecoverable error; cannot complete forceMerge", tragedy);
+          if (tragedy.get() != null) {
+            throw new IllegalStateException("this writer hit an unrecoverable error; cannot complete forceMerge", tragedy.get());
           }
 
           if (mergeExceptions.size() > 0) {
@@ -2167,8 +2251,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         boolean running = true;
         while(running) {
 
-          if (tragedy != null) {
-            throw new IllegalStateException("this writer hit an unrecoverable error; cannot complete forceMergeDeletes", tragedy);
+          if (tragedy.get() != null) {
+            throw new IllegalStateException("this writer hit an unrecoverable error; cannot complete forceMergeDeletes", tragedy.get());
           }
 
           // Check each merge that MergePolicy asked us to
@@ -2259,7 +2343,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     }
 
     // Do not start new merges if disaster struck
-    if (tragedy != null) {
+    if (tragedy.get() != null) {
       return false;
     }
     boolean newMergesFound = false;
@@ -2361,8 +2445,6 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
   }
 
   private void rollbackInternalNoCommit() throws IOException {
-    boolean success = false;
-
     if (infoStream.isEnabled("IW")) {
       infoStream.message("IW", "rollback");
     }
@@ -2381,7 +2463,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       docWriter.abort(this); // don't sync on IW here
       docWriter.flushControl.waitForFlush(); // wait for all concurrently running flushes
       purge(true); // empty the flush ticket queue otherwise we might not have cleaned up all resources
-      synchronized(this) {
+      synchronized (this) {
 
         if (pendingCommit != null) {
           pendingCommit.rollbackCommit(directory);
@@ -2402,8 +2484,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         int rollbackMaxDoc = segmentInfos.totalMaxDoc();
         // now we need to adjust this back to the rolled back SI but don't set it to the absolute value
         // otherwise we might hide internal bugsf
-        adjustPendingNumDocs(-(totalMaxDoc-rollbackMaxDoc));
-        if (infoStream.isEnabled("IW") ) {
+        adjustPendingNumDocs(-(totalMaxDoc - rollbackMaxDoc));
+        if (infoStream.isEnabled("IW")) {
           infoStream.message("IW", "rollback: infos=" + segString(segmentInfos));
         }
 
@@ -2412,7 +2494,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         // Ask deleter to locate unreferenced files & remove
         // them ... only when we are not experiencing a tragedy, else
         // these methods throw ACE:
-        if (tragedy == null) {
+        if (tragedy.get() == null) {
           deleter.checkpoint(segmentInfos, false);
           deleter.refresh();
           deleter.close();
@@ -2424,44 +2506,53 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         // after we leave this sync block and before we enter the sync block in the finally clause below that sets closed:
         closed = true;
 
-        IOUtils.close(writeLock);                     // release write lock
+        IOUtils.close(writeLock); // release write lock
         writeLock = null;
+        closed = true;
+        closing = false;
+        // So any "concurrently closing" threads wake up and see that the close has now completed:
+        notifyAll();
       }
-
-      success = true;
-    } catch (VirtualMachineError tragedy) {
-      tragicEvent(tragedy, "rollbackInternal");
-    } finally {
-      if (success == false) {
+    } catch (Throwable throwable) {
+      try {
         // Must not hold IW's lock while closing
         // mergeScheduler: this can lead to deadlock,
         // e.g. TestIW.testThreadInterruptDeadlock
         IOUtils.closeWhileHandlingException(mergeScheduler);
-      }
-      synchronized(this) {
-        if (success == false) {
+        synchronized (this) {
           // we tried to be nice about it: do the minimum
-          
           // don't leak a segments_N file if there is a pending commit
           if (pendingCommit != null) {
             try {
               pendingCommit.rollbackCommit(directory);
               deleter.decRef(pendingCommit);
             } catch (Throwable t) {
+              throwable.addSuppressed(t);
             }
             pendingCommit = null;
           }
-          
+
           // close all the closeables we can (but important is readerPool and writeLock to prevent leaks)
           IOUtils.closeWhileHandlingException(readerPool, deleter, writeLock);
           writeLock = null;
-        }
-        closed = true;
-        closing = false;
+          closed = true;
+          closing = false;
 
-        // So any "concurrently closing" threads wake up and see that the close has now completed:
-        notifyAll();
+          // So any "concurrently closing" threads wake up and see that the close has now completed:
+          notifyAll();
+        }
+      } catch (Throwable t) {
+        throwable.addSuppressed(t);
+      } finally {
+        if (throwable instanceof VirtualMachineError) {
+          try {
+            tragicEvent(throwable, "rollbackInternal");
+          } catch (Throwable t1){
+            throwable.addSuppressed(t1);
+          }
+        }
       }
+      throw throwable;
     }
   }
 
@@ -2495,6 +2586,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
    * @return The <a href="#sequence_number">sequence number</a>
    * for this operation
    */
+  @SuppressWarnings("try")
   public long deleteAll() throws IOException {
     ensureOpen();
     // Remove any buffered docs
@@ -2512,42 +2604,42 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
      * sure it's just like a fresh index.
      */
     try {
-      synchronized (fullFlushLock) { 
-        docWriter.lockAndAbortAll(this);
-        processEvents(false, true);
-        synchronized (this) {
-          try {
-            // Abort any running merges
-            abortMerges();
-            // Let merges run again
-            stopMerges = false;
-            adjustPendingNumDocs(-segmentInfos.totalMaxDoc());
-            // Remove all segments
-            segmentInfos.clear();
-            // Ask deleter to locate unreferenced files & remove them:
-            deleter.checkpoint(segmentInfos, false);
+      synchronized (fullFlushLock) {
+        try (Closeable finalizer = docWriter.lockAndAbortAll(this)) {
+          processEvents(false);
+          synchronized (this) {
+            try {
+              // Abort any running merges
+              abortMerges();
+              // Let merges run again
+              stopMerges = false;
+              adjustPendingNumDocs(-segmentInfos.totalMaxDoc());
+              // Remove all segments
+              segmentInfos.clear();
+              // Ask deleter to locate unreferenced files & remove them:
+              deleter.checkpoint(segmentInfos, false);
 
-            /* don't refresh the deleter here since there might
-             * be concurrent indexing requests coming in opening
-             * files on the directory after we called DW#abort()
-             * if we do so these indexing requests might hit FNF exceptions.
-             * We will remove the files incrementally as we go...
-             */
-            // Don't bother saving any changes in our segmentInfos
-            readerPool.dropAll(false);
-            // Mark that the index has changed
-            changeCount.incrementAndGet();
-            segmentInfos.changed();
-            globalFieldNumberMap.clear();
-            success = true;
-            long seqNo = docWriter.deleteQueue.getNextSequenceNumber();
-            docWriter.setLastSeqNo(seqNo);
-            return seqNo;
-          } finally {
-            docWriter.unlockAllAfterAbortAll(this);
-            if (!success) {
-              if (infoStream.isEnabled("IW")) {
-                infoStream.message("IW", "hit exception during deleteAll");
+              /* don't refresh the deleter here since there might
+               * be concurrent indexing requests coming in opening
+               * files on the directory after we called DW#abort()
+               * if we do so these indexing requests might hit FNF exceptions.
+               * We will remove the files incrementally as we go...
+               */
+              // Don't bother saving any changes in our segmentInfos
+              readerPool.dropAll(false);
+              // Mark that the index has changed
+              changeCount.incrementAndGet();
+              segmentInfos.changed();
+              globalFieldNumberMap.clear();
+              success = true;
+              long seqNo = docWriter.deleteQueue.getNextSequenceNumber();
+              docWriter.setLastSeqNo(seqNo);
+              return seqNo;
+            } finally {
+              if (success == false) {
+                if (infoStream.isEnabled("IW")) {
+                  infoStream.message("IW", "hit exception during deleteAll");
+                }
               }
             }
           }
@@ -2555,9 +2647,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       }
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "deleteAll");
-
-      // dead code but javac disagrees
-      return -1;
+      throw tragedy;
     }
   }
 
@@ -2920,8 +3010,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
 
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "addIndexes(Directory...)");
-      // dead code but javac disagrees:
-      seqNo = -1;
+      throw tragedy;
     } finally {
       if (successTop) {
         IOUtils.close(locks);
@@ -3098,8 +3187,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       }
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "addIndexes(CodecReader...)");
-      // dead code but javac disagrees:
-      seqNo = -1;
+      throw tragedy;
     }
     maybeMerge();
 
@@ -3199,13 +3287,16 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
   public final boolean flushNextBuffer() throws IOException {
     try {
       if (docWriter.flushOneDWPT()) {
-        processEvents(true, false);
+        processEvents(true);
         return true; // we wrote a segment
       }
-    } catch (AbortingException | VirtualMachineError tragedy) {
+      return false;
+    } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "flushNextBuffer");
+      throw tragedy;
+    } finally {
+      maybeCloseOnTragicEvent();
     }
-    return false;
   }
 
   private long prepareCommitInternal() throws IOException {
@@ -3217,8 +3308,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         infoStream.message("IW", "  index before flush " + segString());
       }
 
-      if (tragedy != null) {
-        throw new IllegalStateException("this writer hit an unrecoverable error; cannot commit", tragedy);
+      if (tragedy.get() != null) {
+        throw new IllegalStateException("this writer hit an unrecoverable error; cannot commit", tragedy.get());
       }
 
       if (pendingCommit != null) {
@@ -3253,7 +3344,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
             }
 
             // cannot pass triggerMerges=true here else it can lead to deadlock:
-            processEvents(false, false);
+            processEvents(false);
             
             flushSuccess = true;
 
@@ -3309,11 +3400,11 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
             doAfterFlush();
           }
         }
-      } catch (AbortingException | VirtualMachineError tragedy) {
+      } catch (VirtualMachineError tragedy) {
         tragicEvent(tragedy, "prepareCommit");
-
-        // dead code but javac disagrees:
-        seqNo = -1;
+        throw tragedy;
+      } finally {
+        maybeCloseOnTragicEvent();
       }
      
       boolean success = false;
@@ -3482,8 +3573,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       synchronized(this) {
         ensureOpen(false);
 
-        if (tragedy != null) {
-          throw new IllegalStateException("this writer hit an unrecoverable error; cannot complete commit", tragedy);
+        if (tragedy.get() != null) {
+          throw new IllegalStateException("this writer hit an unrecoverable error; cannot complete commit", tragedy.get());
         }
 
         if (pendingCommit != null) {
@@ -3541,9 +3632,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       }
       if (commitCompleted) {
         tragicEvent(t, "finishCommit");
-      } else {
-        throw IOUtils.rethrowAlways(t);
       }
+      throw t;
     }
 
     if (infoStream.isEnabled("IW")) {
@@ -3592,8 +3682,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
 
   /** Returns true a segment was flushed or deletes were applied. */
   private boolean doFlush(boolean applyAllDeletes) throws IOException {
-    if (tragedy != null) {
-      throw new IllegalStateException("this writer hit an unrecoverable error; cannot flush", tragedy);
+    if (tragedy.get() != null) {
+      throw new IllegalStateException("this writer hit an unrecoverable error; cannot flush", tragedy.get());
     }
 
     doBeforeFlush();
@@ -3624,7 +3714,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
           flushSuccess = true;
         } finally {
           docWriter.finishFullFlush(this, flushSuccess);
-          processEvents(false, true);
+          processEvents(false);
         }
       }
 
@@ -3639,15 +3729,15 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
         success = true;
         return anyChanges;
       }
-    } catch (AbortingException | VirtualMachineError tragedy) {
+    } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "doFlush");
-      // never hit
-      return false;
+      throw tragedy;
     } finally {
       if (!success) {
         if (infoStream.isEnabled("IW")) {
           infoStream.message("IW", "hit exception during flush");
         }
+        maybeCloseOnTragicEvent();
       }
     }
   }
@@ -3693,18 +3783,6 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     }
   }
   
-  private static class MergedDeletesAndUpdates {
-    ReadersAndUpdates mergedDeletesAndUpdates = null;
-    
-    MergedDeletesAndUpdates() {}
-    
-    final void init(ReaderPool readerPool, MergePolicy.OneMerge merge) throws IOException {
-      if (mergedDeletesAndUpdates == null) {
-        mergedDeletesAndUpdates = readerPool.get(merge.info, true);
-      }
-    }
-  }
-
   /**
    * Carefully merges deletes and updates for the segments we just merged. This
    * is tricky because, although merging will clear all deletes (compacts the
@@ -3880,12 +3958,13 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     return mergedDeletesAndUpdates;
   }
 
+  @SuppressWarnings("try")
   synchronized private boolean commitMerge(MergePolicy.OneMerge merge, MergeState mergeState) throws IOException {
 
     testPoint("startCommitMerge");
 
-    if (tragedy != null) {
-      throw new IllegalStateException("this writer hit an unrecoverable error; cannot complete merge", tragedy);
+    if (tragedy.get() != null) {
+      throw new IllegalStateException("this writer hit an unrecoverable error; cannot complete merge", tragedy.get());
     }
 
     if (infoStream.isEnabled("IW")) {
@@ -3992,26 +4071,11 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       deleteNewFiles(merge.info.files());
     }
 
-    boolean success = false;
-    try {
+    try (Closeable finalizer = this::checkpoint) {
       // Must close before checkpoint, otherwise IFD won't be
       // able to delete the held-open files from the merge
       // readers:
       closeMergeReaders(merge, false);
-      success = true;
-    } finally {
-      // Must note the change to segmentInfos so any commits
-      // in-flight don't lose it (IFD will incRef/protect the
-      // new files we created):
-      if (success) {
-        checkpoint();
-      } else {
-        try {
-          checkpoint();
-        } catch (Throwable t) {
-          // Ignore so we keep throwing original exception.
-        }
-      }
     }
 
     if (infoStream.isEnabled("IW")) {
@@ -4047,7 +4111,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       // in which case we must throw it so, for example, the
       // rollbackTransaction code in addIndexes* is
       // executed.
-      if (merge.isExternal) {
+      if (merge.isExternal) { // TODO can we simplify this and just throw all the time? this would simplify this a lot
         throw (MergePolicy.MergeAbortedException) t;
       }
     } else {
@@ -4105,6 +4169,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       // Important that tragicEvent is called after mergeFinish, else we hang
       // waiting for our merge thread to be removed from runningMerges:
       tragicEvent(t, "merge");
+      throw t;
     }
 
     if (merge.info != null && merge.isAborted() == false) {
@@ -4238,8 +4303,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     assert merge.registerDone;
     assert merge.maxNumSegments == UNBOUNDED_MAX_MERGE_SEGMENTS || merge.maxNumSegments > 0;
 
-    if (tragedy != null) {
-      throw new IllegalStateException("this writer hit an unrecoverable error; cannot merge", tragedy);
+    if (tragedy.get() != null) {
+      throw new IllegalStateException("this writer hit an unrecoverable error; cannot merge", tragedy.get());
     }
 
     if (merge.info != null) {
@@ -4329,49 +4394,27 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     runningMerges.remove(merge);
   }
 
-  private final synchronized void closeMergeReaders(MergePolicy.OneMerge merge, boolean suppressExceptions) throws IOException {
-    final int numSegments = merge.readers.size();
-    Throwable th = null;
-
-    boolean drop = suppressExceptions == false;
-    
-    for (int i = 0; i < numSegments; i++) {
-      final SegmentReader sr = merge.readers.get(i);
-      if (sr != null) {
-        try {
-          final ReadersAndUpdates rld = readerPool.get(sr.getSegmentInfo(), false);
-          // We still hold a ref so it should not have been removed:
-          assert rld != null;
-          if (drop) {
-            rld.dropChanges();
-          } else {
-            rld.dropMergingUpdates();
-          }
-          rld.release(sr);
-          readerPool.release(rld);
-          if (drop) {
-            readerPool.drop(rld.info);
-          }
-        } catch (Throwable t) {
-          if (th == null) {
-            th = t;
-          }
+  @SuppressWarnings("try")
+  private synchronized void closeMergeReaders(MergePolicy.OneMerge merge, boolean suppressExceptions) throws IOException {
+    final boolean drop = suppressExceptions == false;
+    try (Closeable finalizer = merge::mergeFinished) {
+      IOUtils.applyToAll(merge.readers, sr -> {
+        final ReadersAndUpdates rld = readerPool.get(sr.getSegmentInfo(), false);
+        // We still hold a ref so it should not have been removed:
+        assert rld != null;
+        if (drop) {
+          rld.dropChanges();
+        } else {
+          rld.dropMergingUpdates();
         }
-        merge.readers.set(i, null);
-      }
-    }
-
-    try {
-      merge.mergeFinished();
-    } catch (Throwable t) {
-      if (th == null) {
-        th = t;
-      }
-    }
-    
-    // If any error occurred, throw it.
-    if (!suppressExceptions && th != null) {
-      throw IOUtils.rethrowAlways(th);
+        rld.release(sr);
+        readerPool.release(rld);
+        if (drop) {
+          readerPool.drop(rld.info);
+        }
+      });
+    } finally {
+      Collections.fill(merge.readers, null);
     }
   }
 
@@ -4736,8 +4779,8 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     testPoint("startStartCommit");
     assert pendingCommit == null;
 
-    if (tragedy != null) {
-      throw new IllegalStateException("this writer hit an unrecoverable error; cannot commit", tragedy);
+    if (tragedy.get() != null) {
+      throw new IllegalStateException("this writer hit an unrecoverable error; cannot commit", tragedy.get());
     }
 
     try {
@@ -4840,6 +4883,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
       }
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "startCommit");
+      throw tragedy;
     }
     testPoint("finishStartCommit");
   }
@@ -4858,7 +4902,7 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
    * <p><b>NOTE</b>: {@link #warm(LeafReader)} is called before any
    * deletes have been carried over to the merged segment. */
   @FunctionalInterface
-  public static interface IndexReaderWarmer {
+  public interface IndexReaderWarmer {
     /**
      * Invoked on the {@link LeafReader} for the newly
      * merged segment, before that segment is made visible
@@ -4867,50 +4911,50 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     void warm(LeafReader reader) throws IOException;
   }
 
-  void tragicEvent(Throwable tragedy, String location) throws IOException {
-
-    // unbox our internal AbortingException
-    if (tragedy instanceof AbortingException) {
-      tragedy = tragedy.getCause();
-    }
-
+  /**
+   * This method should be called on a tragic event ie. if a downstream class of the writer
+   * hits an unrecoverable exception. This method does not rethrow the tragic event exception. 
+   * Note: This method will not close the writer but can be called from any location without respecting any lock order
+   */
+  final void onTragicEvent(Throwable tragedy, String location) {
     // This is not supposed to be tragic: IW is supposed to catch this and
     // ignore, because it means we asked the merge to abort:
     assert tragedy instanceof MergePolicy.MergeAbortedException == false;
-
-    // We cannot hold IW's lock here else it can lead to deadlock:
-    assert Thread.holdsLock(this) == false;
-
     // How can it be a tragedy when nothing happened?
     assert tragedy != null;
-
     if (infoStream.isEnabled("IW")) {
       infoStream.message("IW", "hit tragic " + tragedy.getClass().getSimpleName() + " inside " + location);
     }
+    this.tragedy.compareAndSet(null, tragedy); // only set it once
+  }
 
-    synchronized (this) {
-      // It's possible you could have a really bad day
-      if (this.tragedy != null) {
-        // Another thread is already dealing / has dealt with the tragedy:
-        throw IOUtils.rethrowAlways(tragedy);
-      }
-
-      this.tragedy = tragedy;
+  /**
+   * This method set the tragic exception unless it's already set and closes the writer
+   * if necessary. Note this method will not rethrow the throwable passed to it.
+   */
+  private void tragicEvent(Throwable tragedy, String location) throws IOException {
+    try {
+      onTragicEvent(tragedy, location);
+    } finally {
+      maybeCloseOnTragicEvent();
     }
+  }
 
+  private void maybeCloseOnTragicEvent() throws IOException {
+    // We cannot hold IW's lock here else it can lead to deadlock:
+    assert Thread.holdsLock(this) == false;
+    assert Thread.holdsLock(fullFlushLock) == false;
     // if we are already closed (e.g. called by rollback), this will be a no-op.
-    if (shouldClose(false)) {
+    if (this.tragedy.get() != null && shouldClose(false)) {
       rollbackInternal();
     }
-
-    throw IOUtils.rethrowAlways(tragedy);
   }
 
   /** If this {@code IndexWriter} was closed as a side-effect of a tragic exception,
    *  e.g. disk full while flushing a new segment, this returns the root cause exception.
    *  Otherwise (no tragic exception has occurred) it returns null. */
   public Throwable getTragicException() {
-    return tragedy;
+    return tragedy.get();
   }
 
   /** Returns {@code true} if this {@code IndexWriter} is still open. */
@@ -5090,26 +5134,22 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
     }
   }
   
-  private void processEvents(boolean triggerMerge, boolean forcePurge) throws IOException {
-    processEvents(eventQueue, triggerMerge, forcePurge);
+  private void processEvents(boolean triggerMerge) throws IOException {
+    if (tragedy.get() == null) {
+      Event event;
+      while ((event = eventQueue.poll()) != null)  {
+        event.process(this);
+      }
+    }
     if (triggerMerge) {
       maybeMerge(getConfig().getMergePolicy(), MergeTrigger.SEGMENT_FLUSH, UNBOUNDED_MAX_MERGE_SEGMENTS);
     }
   }
-  
-  private void processEvents(Queue<Event> queue, boolean triggerMerge, boolean forcePurge) throws IOException {
-    if (tragedy == null) {
-      Event event;
-      while ((event = queue.poll()) != null)  {
-        event.process(this, triggerMerge, forcePurge);
-      }
-    }
-  }
-  
+
   /**
    * Interface for internal atomic events. See {@link DocumentsWriter} for details. Events are executed concurrently and no order is guaranteed.
    * Each event should only rely on the serializeability within its process method. All actions that must happen before or after a certain action must be
-   * encoded inside the {@link #process(IndexWriter, boolean, boolean)} method.
+   * encoded inside the {@link #process(IndexWriter)} method.
    *
    */
   interface Event {
@@ -5120,14 +5160,10 @@ public class IndexWriter implements Closeable, TwoPhaseCommit, Accountable {
      * 
      * @param writer
      *          the {@link IndexWriter} that executes the event.
-     * @param triggerMerge
-     *          <code>false</code> iff this event should not trigger any segment merges
-     * @param clearBuffers
-     *          <code>true</code> iff this event should clear all buffers associated with the event.
      * @throws IOException
      *           if an {@link IOException} occurs
      */
-    void process(IndexWriter writer, boolean triggerMerge, boolean clearBuffers) throws IOException;
+    void process(IndexWriter writer) throws IOException;
   }
 
   /** Anything that will add N docs to the index should reserve first to

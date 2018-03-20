@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.solr.client.solrj.cloud.autoscaling.AutoScalingConfig;
-import org.apache.solr.client.solrj.cloud.autoscaling.DistribStateManager;
+import org.apache.solr.client.solrj.cloud.DistribStateManager;
 import org.apache.solr.client.solrj.cloud.autoscaling.PolicyHelper;
 import org.apache.solr.client.solrj.cloud.autoscaling.ReplicaInfo;
 import org.apache.solr.client.solrj.cloud.autoscaling.Suggestion;
@@ -358,13 +358,13 @@ public class SimClusterStateProvider implements ClusterStateProvider {
    * @param runLeaderElection if true then run a leader election after adding the replica.
    */
   public void simAddReplica(String nodeId, ReplicaInfo replicaInfo, boolean runLeaderElection) throws Exception {
-    // make sure coreNodeName is unique across cluster
+    // make sure SolrCore name is unique across cluster and coreNodeName within collection
     for (Map.Entry<String, List<ReplicaInfo>> e : nodeReplicaMap.entrySet()) {
       for (ReplicaInfo ri : e.getValue()) {
         if (ri.getCore().equals(replicaInfo.getCore())) {
           throw new Exception("Duplicate SolrCore name for existing=" + ri + " on node " + e.getKey() + " and new=" + replicaInfo);
         }
-        if (ri.getName().equals(replicaInfo.getName())) {
+        if (ri.getName().equals(replicaInfo.getName()) && ri.getCollection().equals(replicaInfo.getCollection())) {
           throw new Exception("Duplicate coreNode name for existing=" + ri + " on node " + e.getKey() + " and new=" + replicaInfo);
         }
       }
@@ -396,8 +396,10 @@ public class SimClusterStateProvider implements ClusterStateProvider {
       List<ReplicaInfo> replicas = nodeReplicaMap.computeIfAbsent(nodeId, n -> new ArrayList<>());
       // mark replica as active
       replicaInfo.getVariables().put(ZkStateReader.STATE_PROP, Replica.State.ACTIVE.toString());
-      // add a property expected in tests
-      replicaInfo.getVariables().put(Suggestion.coreidxsize, SimCloudManager.DEFAULT_IDX_SIZE_BYTES);
+      // add a property expected in Policy calculations and in tests
+      // NOTE: this confusingly reuses INDEX.sizeInBytes name but
+      // the actual value is expressed in GB units!!!
+      replicaInfo.getVariables().put(Suggestion.coreidxsize, 1);
 
       replicas.add(replicaInfo);
       // at this point nuke our cached DocCollection state
@@ -855,6 +857,9 @@ public class SimClusterStateProvider implements ClusterStateProvider {
    * @param results operation results.
    */
   public void simSplitShard(ZkNodeProps message, NamedList results) throws Exception {
+    if (message.getStr(CommonAdminParams.ASYNC) != null) {
+      results.add(CoreAdminParams.REQUESTID, message.getStr(CommonAdminParams.ASYNC));
+    }
     String collectionName = message.getStr(COLLECTION_PROP);
     AtomicReference<String> sliceName = new AtomicReference<>();
     sliceName.set(message.getStr(SHARD_ID_PROP));
@@ -869,20 +874,6 @@ public class SimClusterStateProvider implements ClusterStateProvider {
     opDelay(collectionName, CollectionParams.CollectionAction.SPLITSHARD.name());
 
     SplitShardCmd.fillRanges(cloudManager, message, collection, parentSlice, subRanges, subSlices, subShardNames);
-    // mark the old slice as inactive
-    sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
-        .computeIfAbsent(sliceName.get(), s -> new ConcurrentHashMap<>())
-        .put(ZkStateReader.SHARD_STATE_PROP, Slice.State.INACTIVE.toString());
-    // add slice props
-    for (int i = 0; i < subRanges.size(); i++) {
-      String subSlice = subSlices.get(i);
-      DocRouter.Range range = subRanges.get(i);
-      Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
-          .computeIfAbsent(subSlice, ss -> new ConcurrentHashMap<>());
-      sliceProps.put(Slice.RANGE, range);
-      sliceProps.put(Slice.PARENT, sliceName.get());
-      sliceProps.put(ZkStateReader.SHARD_STATE_PROP, Slice.State.ACTIVE.toString());
-    }
     // add replicas for new subShards
     int repFactor = parentSlice.getReplicas().size();
     List<ReplicaPosition> replicaPositions = Assign.identifyNodes(cloudManager,
@@ -909,6 +900,22 @@ public class SimClusterStateProvider implements ClusterStateProvider {
           solrCoreName, collectionName, replicaPosition.shard, replicaPosition.type, subShardNodeName, replicaProps);
       simAddReplica(replicaPosition.node, ri, false);
     }
+    // mark the old slice as inactive
+    Map<String, Object> props = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+        .computeIfAbsent(sliceName.get(), s -> new ConcurrentHashMap<>());
+    props.put(ZkStateReader.STATE_PROP, Slice.State.INACTIVE.toString());
+    props.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+    // add slice props
+    for (int i = 0; i < subRanges.size(); i++) {
+      String subSlice = subSlices.get(i);
+      DocRouter.Range range = subRanges.get(i);
+      Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+          .computeIfAbsent(subSlice, ss -> new ConcurrentHashMap<>());
+      sliceProps.put(Slice.RANGE, range);
+      sliceProps.put(Slice.PARENT, sliceName.get());
+      sliceProps.put(ZkStateReader.STATE_PROP, Slice.State.ACTIVE.toString());
+      props.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+    }
     simRunLeaderElection(Collections.singleton(collectionName), true);
     results.add("success", "");
 
@@ -920,6 +927,9 @@ public class SimClusterStateProvider implements ClusterStateProvider {
    * @param results operation results
    */
   public void simDeleteShard(ZkNodeProps message, NamedList results) throws Exception {
+    if (message.getStr(CommonAdminParams.ASYNC) != null) {
+      results.add(CoreAdminParams.REQUESTID, message.getStr(CommonAdminParams.ASYNC));
+    }
     String collectionName = message.getStr(COLLECTION_PROP);
     String sliceName = message.getStr(SHARD_ID_PROP);
     ClusterState clusterState = getClusterState();

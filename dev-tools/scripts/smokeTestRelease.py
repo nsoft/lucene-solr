@@ -760,7 +760,7 @@ def verifyUnpacked(java, project, artifact, unpackPath, gitRevision, version, te
         #checkJavadocpathFull('%s/solr/build/docs' % unpackPath, False)
 
         print('    test solr example w/ Java 9...')
-        java.run_java9('ant clean example', '%s/antexample.log' % unpackPath)
+        java.run_java9('ant clean server', '%s/antexample.log' % unpackPath)
         testSolrExample(unpackPath, java.java9_home, True)
 
       os.chdir('..')
@@ -1467,6 +1467,9 @@ def main():
 def smokeTest(java, baseURL, gitRevision, version, tmpDir, isSigned, testArgs):
 
   startTime = datetime.datetime.now()
+
+  # disable flakey tests for smoke-tester runs:
+  testArgs = '-Dtests.badapples=false %s' % testArgs
   
   if FORCE_CLEAN:
     if os.path.exists(tmpDir):

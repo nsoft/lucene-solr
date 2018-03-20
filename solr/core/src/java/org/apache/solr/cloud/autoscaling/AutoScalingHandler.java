@@ -42,7 +42,7 @@ import org.apache.solr.client.solrj.cloud.autoscaling.Clause;
 import org.apache.solr.client.solrj.cloud.autoscaling.Policy;
 import org.apache.solr.client.solrj.cloud.autoscaling.PolicyHelper;
 import org.apache.solr.client.solrj.cloud.autoscaling.Preference;
-import org.apache.solr.client.solrj.cloud.autoscaling.SolrCloudManager;
+import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.client.solrj.cloud.autoscaling.TriggerEventProcessorStage;
 import org.apache.solr.client.solrj.cloud.autoscaling.TriggerEventType;
 import org.apache.solr.common.MapWriter;
@@ -369,7 +369,7 @@ public class AutoScalingHandler extends RequestHandlerBase implements Permission
     if (timeout != null) {
       try {
         int timeoutSeconds = parseHumanTime(timeout);
-        resumeTime = new Date(TimeUnit.MILLISECONDS.convert(timeSource.getTime(), TimeUnit.NANOSECONDS)
+        resumeTime = new Date(TimeUnit.MILLISECONDS.convert(timeSource.getTimeNs(), TimeUnit.NANOSECONDS)
             + TimeUnit.MILLISECONDS.convert(timeoutSeconds, TimeUnit.SECONDS));
       } catch (IllegalArgumentException e) {
         op.addError("Invalid 'timeout' value for suspend trigger: " + triggerName);

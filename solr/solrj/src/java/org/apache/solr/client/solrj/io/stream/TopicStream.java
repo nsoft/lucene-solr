@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Map.Entry;
 import java.util.Random;
 import java.util.Set;
@@ -294,8 +295,9 @@ public class TopicStream extends CloudSolrStream implements Expressible  {
     if(streamContext.getSolrClientCache() != null) {
       cloudSolrClient = streamContext.getSolrClientCache().getCloudSolrClient(zkHost);
     } else {
-      cloudSolrClient = new Builder()
-          .withZkHost(zkHost)
+      final List<String> hosts = new ArrayList<String>();
+      hosts.add(zkHost);
+      cloudSolrClient = new Builder(hosts, Optional.empty())
           .build();
       this.cloudSolrClient.connect();
     }
@@ -355,7 +357,7 @@ public class TopicStream extends CloudSolrStream implements Expressible  {
         }
       }
 
-      if (streamContext.getSolrClientCache() == null) {
+      if (streamContext != null && streamContext.getSolrClientCache() == null) {
         cloudSolrClient.close();
       }
     }
@@ -455,6 +457,9 @@ public class TopicStream extends CloudSolrStream implements Expressible  {
 
   private void persistCheckpoints() throws IOException{
 
+    if (cloudSolrClient == null) {
+      return;
+    }
     UpdateRequest request = new UpdateRequest();
     request.setParam("collection", checkpointCollection);
     SolrInputDocument doc = new SolrInputDocument();

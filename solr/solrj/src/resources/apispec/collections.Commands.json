@@ -128,7 +128,7 @@
     },
     "create-alias": {
       "documentation": "https://lucene.apache.org/solr/guide/collections-api.html#createalias",
-      "description": "Allows one or more collections to be known by another name. If this command is used on an existing alias, the existing alias will be replaced with the new collection details.",
+      "description": "Allows one or more collections to be known by another name (to include time partitioned collections). If this command is used on an existing alias, the existing alias will be replaced with the new collection details.",
       "type": "object",
       "properties": {
         "name": {
@@ -137,34 +137,15 @@
         },
         "collections": {
           "type": "array",
-          "description": "The list of collections to be known as this alias.",
+          "description": "The list of collections to be known as this alias. Incompatible with any of the routing parameters. Either this parameter or a complete set of routing parameters is required.",
           "items": {
             "type": "string"
           }
         },
-        "async": {
-          "type": "string",
-          "description": "Defines a request ID that can be used to track this action after it's submitted. The action will be processed asynchronously."
-        }
-      },
-      "required": [
-        "name",
-        "collections"
-      ]
-    },
-    "create-routed-alias": {
-      "type": "object",
-      "documentation": "https://lucene.apache.org/solr/guide/collections-api.html#createalias",
-      "description": "Creates an alias that manages a series of time-partitioned collections.",
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "The alias name to be created."
-        },
         "router" : {
           "type":"object",
           "documentation": "https://lucene.apache.org/solr/guide/collections-api.html#createalias",
-          "description":"routing specific attributes",
+          "description":"Routing specific properties to define a time routed alias.  Do not specify 'collections' when creating a time routed alias.",
           "properties" : {
             "name" : {
               "type" : "string",
@@ -185,7 +166,7 @@
             "maxFutureMs": {
               "type": "integer",
               "description":"How many milliseconds into the future to accept document. Documents with a value in router.field that is greater than now() + maxFutureMs will be rejected to avoid provisioning too much resources."
-            }
+            },
             "autoDeleteAge": {
               "type": "string",
               "description": "A date math expressions yielding a time in the past. Collections covering a period of time entirely before this age will be automatically deleted."
@@ -208,9 +189,7 @@
         }
       },
       "required": [
-        "name",
-        "router",
-        "create-collection"
+        "name"
       ]
     },
     "delete-alias": {
@@ -231,18 +210,18 @@
         "name"
       ]
     },
-    "modify-alias": {
+    "set-alias-property": {
       "documentation": "https://lucene.apache.org/solr/guide/collections-api.html#modifyalias",
-      "description": "Allows changing the metadata on an alias. If a key is set with an empty string then it will be removed",
+      "description": "Allows changing the properties on an alias. If a key is set with an empty string then it will be removed",
       "type": "object",
       "properties": {
         "name": {
           "type": "string",
-          "description": "The alias name on which to set metadata."
+          "description": "The alias name on which to set properties."
         },
-        "metadata" : {
+        "properties" : {
           "type": "object",
-          "description": "A map of key/value pairs that will be associated with the alias as alias metadata. An empty value will delete any existing value for a given key.",
+          "description": "A map of key/value pairs that will be associated with the alias as alias properties (metadata). An empty value will delete any existing value for a given key.",
           "additionalProperties": true
         },
         "async": {

@@ -36,10 +36,11 @@ import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrRequest;
 import org.apache.solr.client.solrj.cloud.autoscaling.AutoScalingConfig;
 import org.apache.solr.client.solrj.cloud.autoscaling.ReplicaInfo;
-import org.apache.solr.client.solrj.cloud.autoscaling.SolrCloudManager;
+import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.client.solrj.cloud.autoscaling.TriggerEventProcessorStage;
 import org.apache.solr.client.solrj.cloud.autoscaling.TriggerEventType;
 import org.apache.solr.client.solrj.request.CollectionAdminRequest;
+import org.apache.solr.cloud.CloudTestUtils;
 import org.apache.solr.cloud.autoscaling.ActionContext;
 import org.apache.solr.cloud.autoscaling.ComputePlanAction;
 import org.apache.solr.cloud.autoscaling.ExecutePlanAction;
@@ -109,6 +110,14 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
 
   @Before
   public void setupTest() throws Exception {
+    // disable .scheduled_maintenance
+    String suspendTriggerCommand = "{" +
+        "'suspend-trigger' : {'name' : '.scheduled_maintenance'}" +
+        "}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, suspendTriggerCommand);
+    SolrClient solrClient = cluster.simGetSolrClient();
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
 
     waitForSeconds = 1 + random().nextInt(3);
     actionConstructorCalled = new CountDownLatch(1);
@@ -233,8 +242,8 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
       }
       try {
         if (lastActionExecutedAt.get() != 0)  {
-          log.info("last action at " + lastActionExecutedAt.get() + " time = " + cluster.getTimeSource().getTime());
-          if (TimeUnit.NANOSECONDS.toMillis(cluster.getTimeSource().getTime() - lastActionExecutedAt.get()) <
+          log.info("last action at " + lastActionExecutedAt.get() + " time = " + cluster.getTimeSource().getTimeNs());
+          if (TimeUnit.NANOSECONDS.toMillis(cluster.getTimeSource().getTimeNs() - lastActionExecutedAt.get()) <
               TimeUnit.SECONDS.toMillis(ScheduledTriggers.DEFAULT_ACTION_THROTTLE_PERIOD_SECONDS) - DELTA_MS) {
             log.info("action executed again before minimum wait time from {}", event.getSource());
             fail("TriggerListener was fired before the throttling period");
@@ -242,7 +251,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
         }
         if (onlyOnce.compareAndSet(false, true)) {
           log.info("action executed from {}", event.getSource());
-          lastActionExecutedAt.set(cluster.getTimeSource().getTime());
+          lastActionExecutedAt.set(cluster.getTimeSource().getTimeNs());
           getTriggerFiredLatch().countDown();
         } else  {
           log.info("action executed more than once from {}", event.getSource());
@@ -255,6 +264,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
   }
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028")
   public void testNodeLostTriggerRestoreState() throws Exception {
     // for this test we want to update the trigger so we must assert that the actions were created twice
     TestTriggerIntegration.actionInitCalled = new CountDownLatch(2);
@@ -542,7 +552,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
       try {
         if (triggerFired.compareAndSet(false, true))  {
           events.add(event);
-          long currentTimeNanos = cluster.getTimeSource().getTime();
+          long currentTimeNanos = cluster.getTimeSource().getTimeNs();
           long eventTimeNanos = event.getEventTime();
           long waitForNanos = TimeUnit.NANOSECONDS.convert(waitForSeconds, TimeUnit.SECONDS) - WAIT_FOR_DELTA_NANOS;
           if (currentTimeNanos - eventTimeNanos <= waitForNanos) {
@@ -650,6 +660,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
   }
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") //2018-03-10
   public void testEventFromRestoredState() throws Exception {
     SolrClient solrClient = cluster.simGetSolrClient();
     String setTriggerCommand = "{" +
@@ -756,6 +767,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
   }
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028")
   public void testNodeMarkersRegistration() throws Exception {
     // for this test we want to create two triggers so we must assert that the actions were created twice
     actionInitCalled = new CountDownLatch(2);
@@ -880,7 +892,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
     public synchronized void onEvent(TriggerEvent event, TriggerEventProcessorStage stage, String actionName,
                                      ActionContext context, Throwable error, String message) {
       List<CapturedEvent> lst = listenerEvents.computeIfAbsent(config.name, s -> new ArrayList<>());
-      lst.add(new CapturedEvent(cluster.getTimeSource().getTime(), context, config, stage, actionName, event, message));
+      lst.add(new CapturedEvent(cluster.getTimeSource().getTimeNs(), context, config, stage, actionName, event, message));
     }
   }
 
@@ -896,6 +908,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
   }
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028")
   public void testListeners() throws Exception {
     SolrClient solrClient = cluster.simGetSolrClient();
     String setTriggerCommand = "{" +
@@ -1040,6 +1053,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
   }
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028")
   public void testCooldown() throws Exception {
     SolrClient solrClient = cluster.simGetSolrClient();
     failDummyAction = false;
@@ -1114,7 +1128,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
     public void process(TriggerEvent event, ActionContext context) throws Exception {
       try {
         events.add(event);
-        long currentTimeNanos = cluster.getTimeSource().getTime();
+        long currentTimeNanos = cluster.getTimeSource().getTimeNs();
         long eventTimeNanos = event.getEventTime();
         long waitForNanos = TimeUnit.NANOSECONDS.convert(waitForSeconds, TimeUnit.SECONDS) - WAIT_FOR_DELTA_NANOS;
         if (currentTimeNanos - eventTimeNanos <= waitForNanos) {
@@ -1129,13 +1143,14 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
   }
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028")
   public void testSearchRate() throws Exception {
     SolrClient solrClient = cluster.simGetSolrClient();
     String COLL1 = "collection1";
     CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(COLL1,
         "conf", 1, 2);
     create.process(solrClient);
-    waitForState(COLL1, 10, TimeUnit.SECONDS, clusterShape(1, 2));
+    CloudTestUtils.waitForState(cluster, COLL1, 10, TimeUnit.SECONDS, CloudTestUtils.clusterShape(1, 2));
 
     String setTriggerCommand = "{" +
         "'set-trigger' : {" +
@@ -1192,7 +1207,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
     assertNull(events.get(3).actionName);
 
     CapturedEvent ev = events.get(0);
-    long now = cluster.getTimeSource().getTime();
+    long now = cluster.getTimeSource().getTimeNs();
     // verify waitFor
     assertTrue(TimeUnit.SECONDS.convert(waitForSeconds, TimeUnit.NANOSECONDS) - WAIT_FOR_DELTA_NANOS <= now - ev.event.getEventTime());
     Map<String, Double> nodeRates = (Map<String, Double>)ev.event.getProperties().get("node");

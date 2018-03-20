@@ -1320,29 +1320,29 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse> 
 
   }
 
-  // MODIFYALIAS request
+  // ALIASPROP request
 
   /**
-   * Returns a SolrRequest to add or remove metadata from a request
+   * Returns a SolrRequest to add or remove properties from an alias
    * @param aliasName         the alias to modify
    */
 
-  public static ModifyAlias modifyAlias(String aliasName) {
-    return new ModifyAlias(aliasName);
+  public static SetAliasProperty setAliasProperty(String aliasName) {
+    return new SetAliasProperty(aliasName);
   }
 
-  public static class ModifyAlias extends AsyncCollectionAdminRequest {
+  public static class SetAliasProperty extends AsyncCollectionAdminRequest {
 
     private final String aliasName;
-    private Map<String,String> metadata = new HashMap<>();
+    private Map<String,String> properties = new HashMap<>();
 
-    public ModifyAlias(String aliasName) {
-      super(CollectionAction.MODIFYALIAS);
+    public SetAliasProperty(String aliasName) {
+      super(CollectionAction.ALIASPROP);
       this.aliasName = SolrIdentifierValidator.validateAliasName(aliasName);
     }
 
-    public ModifyAlias addMetadata(String key, String value) {
-      metadata.put(key,value);
+    public SetAliasProperty addProperty(String key, String value) {
+      properties.put(key,value);
       return this;
     }
 
@@ -1350,7 +1350,7 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse> 
     public SolrParams getParams() {
       ModifiableSolrParams params = (ModifiableSolrParams) super.getParams();
       params.set(CoreAdminParams.NAME, aliasName);
-      metadata.forEach((key, value) ->  params.set("metadata." + key, value));
+      properties.forEach((key, value) ->  params.set("property." + key, value));
       return params;
     }
   }
@@ -1440,7 +1440,7 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse> 
     private final Create createCollTemplate;
 
     public CreateTimeRoutedAlias(String aliasName, String routerField, String start, String interval, String deleteAgeMath, Create createCollTemplate) {
-      super(CollectionAction.CREATEROUTEDALIAS);
+      super(CollectionAction.CREATEALIAS);
       this.aliasName = aliasName;
       this.start = start;
       this.interval = interval;
@@ -1831,6 +1831,45 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse> 
     }
 
 
+  }
+
+  public static CollectionProp setCollectionProperty(String collection, String propertyName, String propertyValue) {
+    return new CollectionProp(collection, propertyName, propertyValue);
+  }
+
+  // COLLECTIONPROP request
+  public static class CollectionProp extends AsyncCollectionSpecificAdminRequest {
+
+    private String propertyName;
+    private String propertyValue;
+
+    private CollectionProp(String collection, String propertyName, String propertyValue) {
+      super(CollectionAction.COLLECTIONPROP, collection);
+      this.propertyName = checkNotNull("propertyName", propertyName);
+      this.propertyValue = propertyValue;
+    }
+
+    public String getPropertyName() {
+      return this.propertyName;
+    }
+
+    public String getPropertyValue() {
+      return this.propertyValue;
+    }
+
+    @Override
+    public SolrParams getParams() {
+      ModifiableSolrParams params = new ModifiableSolrParams(super.getParams());
+      params.add(CollectionAdminParams.PROPERTY_NAME, propertyName);
+      params.add(CollectionAdminParams.PROPERTY_VALUE, propertyValue);
+
+      return params;
+    }
+
+    @Override
+    protected CollectionAdminResponse createResponse(SolrClient client) {
+      return new CollectionAdminResponse();
+    }
   }
 
   /**

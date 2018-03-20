@@ -16,12 +16,7 @@
  */
 package org.apache.solr.util;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.apache.solr.common.SolrException.ErrorCode.FORBIDDEN;
-import static org.apache.solr.common.SolrException.ErrorCode.UNAUTHORIZED;
-import static org.apache.solr.common.params.CommonParams.DISTRIB;
-import static org.apache.solr.common.params.CommonParams.NAME;
-
+import javax.net.ssl.SSLPeerUnverifiedException;
 import java.io.Console;
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -45,6 +40,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -61,8 +57,6 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
-
-import javax.net.ssl.SSLPeerUnverifiedException;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.GnuParser;
@@ -96,13 +90,16 @@ import org.apache.http.util.EntityUtils;
 import org.apache.lucene.util.Version;
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrQuery;
+import org.apache.solr.client.solrj.SolrRequest;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.client.solrj.impl.HttpClientUtil;
 import org.apache.solr.client.solrj.impl.HttpSolrClient;
 import org.apache.solr.client.solrj.impl.HttpSolrClient.Builder;
 import org.apache.solr.client.solrj.impl.ZkClientClusterStateProvider;
+import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.request.ContentStreamUpdateRequest;
+import org.apache.solr.client.solrj.response.CollectionAdminResponse;
 import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.cloud.ClusterState;
@@ -127,6 +124,12 @@ import org.noggit.JSONWriter;
 import org.noggit.ObjectBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.solr.common.SolrException.ErrorCode.FORBIDDEN;
+import static org.apache.solr.common.SolrException.ErrorCode.UNAUTHORIZED;
+import static org.apache.solr.common.params.CommonParams.DISTRIB;
+import static org.apache.solr.common.params.CommonParams.NAME;
 
 /**
  * Command-line utility for working with Solr.
@@ -203,7 +206,7 @@ public class SolrCLI {
       String zkHost = cli.getOptionValue("zkHost", ZK_HOST);
       
       log.debug("Connecting to Solr cluster: " + zkHost);
-      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder().withZkHost(zkHost).build()) {
+      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder(Collections.singletonList(zkHost), Optional.empty()).build()) {
 
         String collection = cli.getOptionValue("collection");
         if (collection != null)
@@ -1372,7 +1375,7 @@ public class SolrCLI {
       if (zkHost == null)
         throw new IllegalStateException("Must provide either the '-solrUrl' or '-zkHost' parameters!");
 
-      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder().withZkHost(zkHost).build()) {
+      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder(Collections.singletonList(zkHost), Optional.empty()).build()) {
         cloudSolrClient.connect();
         Set<String> liveNodes = cloudSolrClient.getZkStateReader().getClusterState().getLiveNodes();
         if (liveNodes.isEmpty())
@@ -1498,7 +1501,7 @@ public class SolrCLI {
             "create_collection can only be used when running in SolrCloud mode.\n");
       }
 
-      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder().withZkHost(zkHost).build()) {
+      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder(Collections.singletonList(zkHost), Optional.empty()).build()) {
         echoIfVerbose("\nConnecting to ZooKeeper at " + zkHost+" ...", cli);
         cloudSolrClient.connect();
         runCloudTool(cloudSolrClient, cli);
@@ -2377,7 +2380,7 @@ public class SolrCLI {
 
     protected void deleteCollection(CommandLine cli) throws Exception {
       String zkHost = getZkHost(cli);
-      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder().withZkHost(zkHost).build()) {
+      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder(Collections.singletonList(zkHost), Optional.empty()).build()) {
         echoIfVerbose("Connecting to ZooKeeper at " + zkHost, cli);
         cloudSolrClient.connect();
         deleteCollection(cloudSolrClient, cli);
@@ -2981,8 +2984,7 @@ public class SolrCLI {
     protected void waitToSeeLiveNodes(int maxWaitSecs, String zkHost, int numNodes) {
       CloudSolrClient cloudClient = null;
       try {
-        cloudClient = new CloudSolrClient.Builder()
-            .withZkHost(zkHost)
+        cloudClient = new CloudSolrClient.Builder(Collections.singletonList(zkHost), Optional.empty())
             .build();
         cloudClient.connect();
         Set<String> liveNodes = cloudClient.getZkStateReader().getClusterState().getLiveNodes();
@@ -3440,6 +3442,18 @@ public class SolrCLI {
               .withArgName("directory")
               .create("X"),
           OptionBuilder
+              .withDescription("Asserts that Solr is running in cloud mode.  Also fails if Solr not running.  URL should be for root Solr path.")
+              .withLongOpt("cloud")
+              .hasArg(true)
+              .withArgName("url")
+              .create("c"),
+          OptionBuilder
+              .withDescription("Asserts that Solr is not running in cloud mode.  Also fails if Solr not running.  URL should be for root Solr path.")
+              .withLongOpt("not-cloud")
+              .hasArg(true)
+              .withArgName("url")
+              .create("C"),
+          OptionBuilder
               .withDescription("Exception message to be used in place of the default error message")
               .withLongOpt("message")
               .hasArg(true)
@@ -3491,7 +3505,7 @@ public class SolrCLI {
      */
     protected int runAssert(CommandLine cli) throws Exception {
       if (cli.getOptions().length == 0 || cli.getArgs().length > 0 || cli.hasOption("h")) {
-        new HelpFormatter().printHelp("bin/solr assert [-m <message>] [-e] [-rR] [-s <url>] [-S <url>] [-u <dir>] [-x <dir>] [-X <dir>]", getToolOptions(this));
+        new HelpFormatter().printHelp("bin/solr assert [-m <message>] [-e] [-rR] [-s <url>] [-S <url>] [-c <url>] [-C <url>] [-u <dir>] [-x <dir>] [-X <dir>]", getToolOptions(this));
         return 1;
       }
       if (cli.hasOption("m")) {
@@ -3525,6 +3539,12 @@ public class SolrCLI {
       }
       if (cli.hasOption("S")) {
         ret += assertSolrNotRunning(cli.getOptionValue("S"));
+      }
+      if (cli.hasOption("c")) {
+        ret += assertSolrRunningInCloudMode(cli.getOptionValue("c"));
+      }
+      if (cli.hasOption("C")) {
+        ret += assertSolrNotRunningInCloudMode(cli.getOptionValue("C"));
       }
       return ret;
     }
@@ -3570,6 +3590,28 @@ public class SolrCLI {
         }
       }
       return exitOrException("Solr is still running at " + url + " after " + timeoutMs.orElse(1000L) / 1000 + "s");
+    }
+
+    public static int assertSolrRunningInCloudMode(String url) throws Exception {
+      if (! isSolrRunningOn(url)) {
+        return exitOrException("Solr is not running on url " + url + " after " + timeoutMs.orElse(1000L) / 1000 + "s");
+      }
+
+      if (! runningSolrIsCloud(url)) {
+        return exitOrException("Solr is not running in cloud mode on " + url);
+      }
+      return 0;
+    }
+
+    public static int assertSolrNotRunningInCloudMode(String url) throws Exception {
+      if (! isSolrRunningOn(url)) {
+        return exitOrException("Solr is not running on url " + url + " after " + timeoutMs.orElse(1000L) / 1000 + "s");
+      }
+
+      if (runningSolrIsCloud(url)) {
+        return exitOrException("Solr is not running in standalone mode on " + url);
+      }
+      return 0;
     }
 
     public static int sameUser(String directory) throws Exception {
@@ -3625,14 +3667,46 @@ public class SolrCLI {
       }
     }
 
-    private static int exitOrException(String msg) throws Exception {
+    private static int exitOrException(String msg) throws AssertionFailureException {
       if (useExitCode) {
         return 1;
       } else {
-        throw new Exception(message != null ? message : msg);
+        throw new AssertionFailureException(message != null ? message : msg);
+      }
+    }
+
+    private static boolean isSolrRunningOn(String url) throws Exception {
+      StatusTool status = new StatusTool();
+      try {
+        status.waitToSeeSolrUp(url, timeoutMs.orElse(1000L).intValue() / 1000);
+        return true;
+      } catch (Exception se) {
+        if (exceptionIsAuthRelated(se)) {
+          throw se;
+        }
+        return false;
+      }
+    }
+
+    private static boolean runningSolrIsCloud(String url) throws Exception {
+      try (final HttpSolrClient client = new HttpSolrClient.Builder(url).build()) {
+        final SolrRequest<CollectionAdminResponse> request = new CollectionAdminRequest.ClusterStatus();
+        final CollectionAdminResponse response = request.process(client);
+        return response != null;
+      } catch (Exception e) {
+        if (exceptionIsAuthRelated(e)) {
+          throw e;
+        }
+        return false;
       }
     }
   } // end AssertTool class
+
+  public static class AssertionFailureException extends Exception {
+    public AssertionFailureException(String message) {
+      super(message);
+    }
+  }
 
   // Authentication tool
   public static class AuthTool extends ToolBase {

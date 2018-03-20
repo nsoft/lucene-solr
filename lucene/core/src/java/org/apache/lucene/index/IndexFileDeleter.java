@@ -341,8 +341,8 @@ final class IndexFileDeleter implements Closeable {
   void ensureOpen() throws AlreadyClosedException {
     writer.ensureOpen(false);
     // since we allow 'closing' state, we must still check this, we could be closing because we hit e.g. OOM
-    if (writer.tragedy != null) {
-      throw new AlreadyClosedException("refusing to delete any files: this IndexWriter hit an unrecoverable exception", writer.tragedy);
+    if (writer.tragedy.get() != null) {
+      throw new AlreadyClosedException("refusing to delete any files: this IndexWriter hit an unrecoverable exception", writer.tragedy.get());
     }
   }
 
@@ -354,10 +354,6 @@ final class IndexFileDeleter implements Closeable {
     } catch (AlreadyClosedException ace) {
       return true;
     }
-  }
-
-  public SegmentInfos getLastSegmentInfos() {
-    return lastSegmentInfos;
   }
 
   /**
@@ -381,9 +377,7 @@ final class IndexFileDeleter implements Closeable {
         try {
           decRef(commit.files);
         } catch (Throwable t) {
-          if (firstThrowable == null) {
-            firstThrowable = t;
-          }
+          firstThrowable = IOUtils.useOrSuppress(firstThrowable, t);
         }
       }
       commitsToDelete.clear();
@@ -583,20 +577,14 @@ final class IndexFileDeleter implements Closeable {
           toDelete.add(file);
         }
       } catch (Throwable t) {
-        if (firstThrowable == null) {
-          // Save first exception and throw it in the end, but be sure to finish decRef all files
-          firstThrowable = t;
-        }
+        firstThrowable = IOUtils.useOrSuppress(firstThrowable, t);
       }
     }
 
     try {
       deleteFiles(toDelete);
     } catch (Throwable t) {
-      if (firstThrowable == null) {
-        // Save first exception and throw it in the end, but be sure to finish decRef all files
-        firstThrowable = t;
-      }
+      firstThrowable = IOUtils.useOrSuppress(firstThrowable, t);
     }
 
     if (firstThrowable != null) {

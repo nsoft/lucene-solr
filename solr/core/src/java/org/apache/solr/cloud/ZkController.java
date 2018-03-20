@@ -38,6 +38,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
@@ -51,12 +52,11 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.base.Strings;
 import org.apache.commons.lang.StringUtils;
-import org.apache.solr.client.solrj.cloud.autoscaling.SolrCloudManager;
+import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.client.solrj.impl.HttpSolrClient;
 import org.apache.solr.client.solrj.impl.HttpSolrClient.Builder;
 import org.apache.solr.client.solrj.impl.SolrClientCloudManager;
-import org.apache.solr.client.solrj.impl.ZkClientClusterStateProvider;
 import org.apache.solr.client.solrj.request.CoreAdminRequest.WaitForState;
 import org.apache.solr.client.solrj.cloud.autoscaling.TriggerEventType;
 import org.apache.solr.cloud.overseer.OverseerAction;
@@ -614,9 +614,7 @@ public class ZkController {
       if (cloudManager != null) {
         return cloudManager;
       }
-      cloudSolrClient = new CloudSolrClient.Builder()
-          .withClusterStateProvider(new ZkClientClusterStateProvider(zkStateReader))
-          .build();
+      cloudSolrClient = new CloudSolrClient.Builder(Collections.singletonList(zkServerAddress), Optional.empty()).build();
       cloudManager = new SolrClientCloudManager(new ZkDistributedQueueFactory(zkClient), cloudSolrClient);
     }
     return cloudManager;
@@ -1045,7 +1043,7 @@ public class ZkController {
 
       // This flag is used for testing rolling updates and should be removed in SOLR-11812
       boolean isRunningInNewLIR = "new".equals(desc.getCoreProperty("lirVersion", "new"));
-      if (isRunningInNewLIR) {
+      if (isRunningInNewLIR && cloudDesc.getReplicaType() != Type.PULL) {
         shardTerms.registerTerm(coreZkNodeName);
       }
       String shardId = cloudDesc.getShardId();
@@ -1148,6 +1146,9 @@ public class ZkController {
       // make sure we have an update cluster state right away
       zkStateReader.forceUpdateCollection(collection);
       return shardId;
+    } catch (Exception e) {
+      unregister(coreName, desc, false);
+      throw e;
     } finally {
       MDCLoggingContext.clear();
     }
@@ -1455,13 +1456,20 @@ public class ZkController {
 
       // This flag is used for testing rolling updates and should be removed in SOLR-11812
       boolean isRunningInNewLIR = "new".equals(cd.getCoreProperty("lirVersion", "new"));
-      if (state == Replica.State.RECOVERING && isRunningInNewLIR) {
-        getShardTerms(collection, shardId).setEqualsToMax(coreNodeName);
+      // pull replicas are excluded because their terms are not considered
+      if (state == Replica.State.RECOVERING && isRunningInNewLIR && cd.getCloudDescriptor().getReplicaType() != Type.PULL) {
+        // state is used by client, state of replica can change from RECOVERING to DOWN without needed to finish recovery
+        // by calling this we will know that a replica actually finished recovery or not
+        getShardTerms(collection, shardId).startRecovering(coreNodeName);
       }
+      if (state == Replica.State.ACTIVE && isRunningInNewLIR && cd.getCloudDescriptor().getReplicaType() != Type.PULL) {
+        getShardTerms(collection, shardId).doneRecovering(coreNodeName);
+      }
+
       ZkNodeProps m = new ZkNodeProps(props);
       
       if (updateLastState) {
-        cd.getCloudDescriptor().lastPublished = state;
+        cd.getCloudDescriptor().setLastPublished(state);
       }
       overseerJobQueue.offer(Utils.toJSON(m));
     } finally {
@@ -1488,6 +1496,10 @@ public class ZkController {
   }
 
   public void unregister(String coreName, CoreDescriptor cd) throws Exception {
+    unregister(coreName, cd, true);
+  }
+
+  public void unregister(String coreName, CoreDescriptor cd, boolean removeCoreFromZk) throws Exception {
     final String coreNodeName = cd.getCloudDescriptor().getCoreNodeName();
     final String collection = cd.getCloudDescriptor().getCollectionName();
     getCollectionTerms(collection).remove(cd.getCloudDescriptor().getShardId(), cd);
@@ -1499,7 +1511,7 @@ public class ZkController {
     }
     final DocCollection docCollection = zkStateReader.getClusterState().getCollectionOrNull(collection);
     Replica replica = (docCollection == null) ? null : docCollection.getReplica(coreNodeName);
-    
+
     if (replica == null || replica.getType() != Type.PULL) {
       ElectionContext context = electionContexts.remove(new ContextKey(collection, coreNodeName));
 
@@ -1509,14 +1521,15 @@ public class ZkController {
     }
     CloudDescriptor cloudDescriptor = cd.getCloudDescriptor();
     zkStateReader.unregisterCore(cloudDescriptor.getCollectionName());
-
-    ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION,
-        OverseerAction.DELETECORE.toLower(), ZkStateReader.CORE_NAME_PROP, coreName,
-        ZkStateReader.NODE_NAME_PROP, getNodeName(),
-        ZkStateReader.COLLECTION_PROP, cloudDescriptor.getCollectionName(),
-        ZkStateReader.BASE_URL_PROP, getBaseUrl(),
-        ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName);
-    overseerJobQueue.offer(Utils.toJSON(m));
+    if (removeCoreFromZk) {
+      ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION,
+          OverseerAction.DELETECORE.toLower(), ZkStateReader.CORE_NAME_PROP, coreName,
+          ZkStateReader.NODE_NAME_PROP, getNodeName(),
+          ZkStateReader.COLLECTION_PROP, cloudDescriptor.getCollectionName(),
+          ZkStateReader.BASE_URL_PROP, getBaseUrl(),
+          ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName);
+      overseerJobQueue.offer(Utils.toJSON(m));
+    }
   }
 
   public void createCollection(String collection) throws Exception {
@@ -1697,7 +1710,7 @@ public class ZkController {
       AtomicReference<String> errorMessage = new AtomicReference<>();
       AtomicReference<DocCollection> collectionState = new AtomicReference<>();
       try {
-        zkStateReader.waitForState(cd.getCollectionName(), 3, TimeUnit.SECONDS, (n, c) -> {
+        zkStateReader.waitForState(cd.getCollectionName(), 10, TimeUnit.SECONDS, (n, c) -> {
           collectionState.set(c);
           if (c == null)
             return false;

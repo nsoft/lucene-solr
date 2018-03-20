@@ -15,8 +15,9 @@
  limitations under the License.
 */
 solrAdminApp.controller('ClusterSuggestionsController',
-function($scope,$http) {
-    $scope.data={}
+function($scope, $http, Constants) {
+    $scope.resetMenu("cluster-suggestion", Constants.IS_COLLECTION_PAGE);
+    $scope.data={};
     var dataArr =[];
     var dataJson = {};
     //function to display suggestion
