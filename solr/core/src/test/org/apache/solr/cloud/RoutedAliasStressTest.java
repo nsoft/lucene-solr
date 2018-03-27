@@ -56,11 +56,12 @@ import org.slf4j.LoggerFactory;
 public class RoutedAliasStressTest extends RoutedAliasTestCase {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private static AtomicLong idGen = new AtomicLong(0);
 
   private static final int THREADS_PER_INTERVAL = 1;
   private static final int INTERVALS = 10; // how many intervals the TRA keeps
   private static final int TOTAL_THREADS = 2 * THREADS_PER_INTERVAL * INTERVALS;
-  private static String INTERVAL_DURATION = "+3SECOND";
+  private static String INTERVAL_DURATION = "+5SECOND";
 
   @BeforeClass
   public static void setupCluster() throws Exception {
@@ -238,6 +239,143 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
   }
 
 
+
+  /**
+   * A test that blasts documents at cloudsolrclient  time allowed until after all collections have been deleted at least once.
+   */
+  @Test
+  public void testSendingNowDocs() throws InterruptedException, IOException, SolrServerException {
+
+
+    CollectionAdminRequest.Create template = CollectionAdminRequest.createCollection("ignored", "_default", 2, 2);
+    CloudSolrClient providedClient = cloudClientProvider.getProvidedClient();
+    providedClient.setDefaultCollection(getTestName());
+
+    // create the alias to start one interval AFTER we start all our threads sending.
+    // This ensures that at least one thread is going to be failing with documents before
+    // the start time
+
+    StringBuilder builder = new StringBuilder();
+    for (int i = 0; i < INTERVALS; i++) {
+      builder.append(INTERVAL_DURATION);
+    }
+    String deleteAgeMath = builder.toString().replaceAll("\\+", "-");
+    CollectionAdminRequest.createTimeRoutedAlias(getTestName(),
+        "NOW/MINUTE+1MINUTE" + INTERVAL_DURATION, INTERVAL_DURATION, "time_dt", template, deleteAgeMath)
+        .process(providedClient);
+
+    Thread[] testerThreads = new Thread[TOTAL_THREADS];
+
+    DateMathParser parser = new DateMathParser();
+
+    // wait a minute to get things settled, make sure all is started up
+    Instant beginningAt = DateMathParser.parseMath(new Date(), "NOW/MINUTE+1MINUTE").toInstant();
+
+    Instant[] timesForTesters = new Instant[INTERVALS * 2 + 1];
+    Instant temp = beginningAt;
+    for (int i = 0; i < timesForTesters.length; i++) {
+      timesForTesters[i] = temp;
+      parser.setNow(Date.from(temp));
+      temp = DateMathParser.parseMath(Date.from(temp), "NOW" + INTERVAL_DURATION).toInstant();
+    }
+
+    CountDownLatch allComplete = new CountDownLatch(TOTAL_THREADS);
+    List<IntervalTester> testers = new ArrayList<>(TOTAL_THREADS);
+
+    // prophylactic thread to shut things down if errors have caused us to be failing to stop
+    // also used to ensure all threads are interrupted and complete at end of test...
+    Thread timeoutThread = new Thread(() -> {
+      try {
+        Thread.sleep(INTERVALS * 60 * 1000); // assuming test should take no more than 1 min per interval
+      } catch (InterruptedException e) {
+        // all good, no worries
+      }
+      for (Thread testerThread : testerThreads) {
+        if (testerThread != null) {
+          testerThread.interrupt();
+        }
+      }
+    });
+    timeoutThread.start();
+
+    try {
+      for (int i = 0; i < TOTAL_THREADS; i++) {
+        int intervalStart = (int) Math.floor(i / (float) THREADS_PER_INTERVAL);
+        int intervalEnd = intervalStart + 1;
+        DocumentGenerator generator = new DocumentGenerator() {
+
+          @Override
+          public SolrInputDocument nextDoc() {
+            SolrInputDocument next = new SolrInputDocument();
+            next.setField("id", idGen.incrementAndGet());
+            next.setField("time_dt", DateTimeFormatter.ISO_INSTANT.format(makeDate()));
+            return next;
+          }
+
+          Instant makeDate() {
+            return Instant.now();
+          }
+        };
+        IntervalTester tester = new IntervalTester(generator, cloudClientProvider.getProvidedClient(), beginningAt, timesForTesters[timesForTesters.length - 1], 100, 100);
+        testers.add(tester);
+        testerThreads[i] = new Thread(() -> {
+          try {
+            tester.run();
+          } finally {
+            allComplete.countDown();
+          }
+        });
+        testerThreads[i].setDaemon(true);
+        testerThreads[i].start();
+      }
+    } catch (Exception e) {
+      // ensure that the threads don't run long even if there's a bug. This should hopefully avoid issues with
+      // stuck threads causing errors with test infrastructure thread tracking by ensuring all threads complete;
+      timeoutThread.interrupt();
+      Thread.sleep(2000);
+      throw e;
+    }
+    allComplete.await();
+    long finished = System.currentTimeMillis();
+    timeoutThread.interrupt(); // will cause timeout thread to complete so it doesn't linger
+    timeoutThread.join();      // wait for said completion
+
+
+    //nocommit : the above doesn't seem to be working as well as expected. Sometimes threads still linger :(
+
+    // some time for possibly overloaded client to recover before test ends and mini cluster shuts down...
+    // not sure this is needed...
+    Thread.sleep(5000);
+
+    // print all errors
+    for (IntervalTester tester : testers) {
+      if (tester.fail != null) {
+        log.error("TEST WILL FAIL: got {} in {}" + tester.fail, tester);
+      }
+    }
+    // then fail out on the first one
+    for (IntervalTester tester : testers) {
+      if (tester.fail != null) {
+        throw tester.fail;
+      }
+    }
+    int successCount = 0;
+    for (IntervalTester tester : testers) {
+      tester.assertContiguousSuccess();
+      if (tester.someSuccess()) {
+        successCount++;
+      }
+    }
+    System.out.println(successCount);
+    assertTrue(successCount > 0);
+
+
+    // TODO: make sure set of collections is as expected (some should have been deleted)
+
+    // TODO: run through added docs, make sure all are in correct collection
+
+  }
+
   /**
    * A class to test addition of documents over time. The intended use is that N of these are set up to push
    * documents for a short time before the TRA would accept documents and a short time after. Success is defined
@@ -253,7 +391,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
 
     private static AtomicInteger instanceNum = new AtomicInteger(0);
 
-    private TemporalDocumentGenerator generator;
+    private DocumentGenerator generator;
     private CloudSolrClient cloudSolrClient;
     private Instant start;
     private Instant stop;
@@ -266,7 +404,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
     private int interBatchPause;
 
 
-    IntervalTester(TemporalDocumentGenerator generator, CloudSolrClient cloudSolrClient, Instant start, Instant stop, int batchSize, int interBatchPause) {
+    IntervalTester(DocumentGenerator generator, CloudSolrClient cloudSolrClient, Instant start, Instant stop, int batchSize, int interBatchPause) {
       this.generator = generator;
       this.cloudSolrClient = cloudSolrClient;
       this.start = start;
@@ -402,9 +540,8 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
    * temporal field. Optionally a set of data can be added to ensure that actual indexing/analysis load
    * is simulated. The added data set will be randomly queried to generate documents.
    */
-  static class TemporalDocumentGenerator {
+  static class TemporalDocumentGenerator implements DocumentGenerator {
 
-    private static AtomicLong idGen = new AtomicLong(0);
 
     private ListMultimap<String, Object> fieldDataSet = ArrayListMultimap.create();
     private String temporalField;
@@ -433,6 +570,7 @@ public class RoutedAliasStressTest extends RoutedAliasTestCase {
       this.fieldDataSet = dataSet;
     }
 
+    @Override
     public SolrInputDocument nextDoc() {
       SolrInputDocument next = new SolrInputDocument();
       next.setField("id", idGen.incrementAndGet());
