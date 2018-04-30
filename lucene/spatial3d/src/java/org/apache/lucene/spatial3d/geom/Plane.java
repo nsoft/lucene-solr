@@ -1273,7 +1273,9 @@ public class Plane extends Vector {
         // Since a==b==0, any plane including the Z axis suffices.
         //System.err.println("      Perpendicular to z");
         final GeoPoint[] points = findIntersections(planetModel, normalYPlane, NO_BOUNDS, NO_BOUNDS);
-        boundsInfo.addZValue(points[0]);
+        if (points.length > 0) {
+          boundsInfo.addZValue(points[0]);
+        }
       }
     }
 
@@ -2341,20 +2343,66 @@ public class Plane extends Vector {
   }
 
   /**
+   * Returns true if this plane and the other plane are functionally identical within the margin of error.
+   * Functionally identical means that the planes are so close to parallel that many aspects of planar math,
+   * like intersections, no longer have answers to within the required precision.
+   * @param p is the plane to compare against.
+   * @return true if the planes are functionally identical.
+   */
+  public boolean isFunctionallyIdentical(final Plane p) {
+    // We can get the correlation by just doing a parallel plane check.  That's basically finding
+    // out if the magnitude of the cross-product is "zero".
+    final double cross1 = this.y * p.z - this.z * p.y;
+    final double cross2 = this.z * p.x - this.x * p.z;
+    final double cross3 = this.x * p.y - this.y * p.x;
+    //System.out.println("cross product magnitude = "+(cross1 * cross1 + cross2 * cross2 + cross3 * cross3));
+    // Should be MINIMUM_RESOLUTION_SQUARED, but that gives us planes that are *almost* parallel, and those are problematic too,
+    // so we have a tighter constraint on parallelism in this method.
+    if (cross1 * cross1 + cross2 * cross2 + cross3 * cross3 >= MINIMUM_RESOLUTION) {
+      return false;
+    }
+    
+    // Now, see whether the parallel planes are in fact on top of one another.
+    // The math:
+    // We need a single point that fulfills:
+    // Ax + By + Cz + D = 0
+    // Pick:
+    // x0 = -(A * D) / (A^2 + B^2 + C^2)
+    // y0 = -(B * D) / (A^2 + B^2 + C^2)
+    // z0 = -(C * D) / (A^2 + B^2 + C^2)
+    // Check:
+    // A (x0) + B (y0) + C (z0) + D =? 0
+    // A (-(A * D) / (A^2 + B^2 + C^2)) + B (-(B * D) / (A^2 + B^2 + C^2)) + C (-(C * D) / (A^2 + B^2 + C^2)) + D ?= 0
+    // -D [ A^2 / (A^2 + B^2 + C^2) + B^2 / (A^2 + B^2 + C^2) + C^2 / (A^2 + B^2 + C^2)] + D ?= 0
+    // Yes.
+    final double denom = 1.0 / (p.x * p.x + p.y * p.y + p.z * p.z);
+    return evaluateIsZero(-p.x * p.D * denom, -p.y * p.D * denom, -p.z * p.D * denom);
+  }
+  
+  /**
    * Returns true if this plane and the other plane are identical within the margin of error.
    * @param p is the plane to compare against.
    * @return true if the planes are numerically identical.
    */
   public boolean isNumericallyIdentical(final Plane p) {
-    // We can get the correlation by just doing a parallel plane check.  If that passes, then compute a point on the plane
-    // (using D) and see if it also on the other plane.
+    // We can get the correlation by just doing a parallel plane check.  That's basically finding
+    // out if the magnitude of the cross-product is "zero".
+    final double cross1 = this.y * p.z - this.z * p.y;
+    final double cross2 = this.z * p.x - this.x * p.z;
+    final double cross3 = this.x * p.y - this.y * p.x;
+    //System.out.println("cross product magnitude = "+(cross1 * cross1 + cross2 * cross2 + cross3 * cross3));
+    if (cross1 * cross1 + cross2 * cross2 + cross3 * cross3 >= MINIMUM_RESOLUTION_SQUARED) {
+      return false;
+    }
+    /* Old method
     if (Math.abs(this.y * p.z - this.z * p.y) >= MINIMUM_RESOLUTION)
       return false;
     if (Math.abs(this.z * p.x - this.x * p.z) >= MINIMUM_RESOLUTION)
       return false;
     if (Math.abs(this.x * p.y - this.y * p.x) >= MINIMUM_RESOLUTION)
       return false;
-
+    */
+    
     // Now, see whether the parallel planes are in fact on top of one another.
     // The math:
     // We need a single point that fulfills:

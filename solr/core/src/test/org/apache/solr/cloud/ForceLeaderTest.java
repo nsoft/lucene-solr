@@ -149,7 +149,7 @@ public class ForceLeaderTest extends HttpPartitionTest {
     }
   }
 
-  void putNonLeadersIntoLowerTerm(String collectionName, String shard, ZkController zkController, Replica leader, List<Replica> notLeaders) throws Exception {
+  private void putNonLeadersIntoLowerTerm(String collectionName, String shard, ZkController zkController, Replica leader, List<Replica> notLeaders) throws Exception {
     SocketProxy[] nonLeaderProxies = new SocketProxy[notLeaders.size()];
     for (int i = 0; i < notLeaders.size(); i++)
       nonLeaderProxies[i] = getProxyForReplica(notLeaders.get(i));
@@ -315,7 +315,7 @@ public class ForceLeaderTest extends HttpPartitionTest {
     }
   }
 
-  void assertSendDocFails(int docId) throws Exception {
+  private void assertSendDocFails(int docId) throws Exception {
     // sending a doc in this state fails
     try {
       sendDoc(docId);
@@ -326,7 +326,7 @@ public class ForceLeaderTest extends HttpPartitionTest {
     }
   }
 
-  void putNonLeadersIntoLIR(String collectionName, String shard, ZkController zkController, Replica leader, List<Replica> notLeaders) throws Exception {
+  private void putNonLeadersIntoLIR(String collectionName, String shard, ZkController zkController, Replica leader, List<Replica> notLeaders) throws Exception {
     SocketProxy[] nonLeaderProxies = new SocketProxy[notLeaders.size()];
     for (int i = 0; i < notLeaders.size(); i++)
       nonLeaderProxies[i] = getProxyForReplica(notLeaders.get(i));
@@ -388,7 +388,7 @@ public class ForceLeaderTest extends HttpPartitionTest {
           Replica.State.DOWN == lirState || Replica.State.RECOVERING == lirState);
   }
 
-  protected void bringBackOldLeaderAndSendDoc(String collection, Replica leader, List<Replica> notLeaders, int docid) throws Exception {
+  private void bringBackOldLeaderAndSendDoc(String collection, Replica leader, List<Replica> notLeaders, int docid) throws Exception {
     // Bring back the leader which was stopped
     log.info("Bringing back originally killed leader...");
     JettySolrRunner leaderJetty = getJettyOnPort(getReplicaPort(leader));
@@ -409,7 +409,7 @@ public class ForceLeaderTest extends HttpPartitionTest {
     assertDocsExistInAllReplicas(Collections.singletonList(leader), collection, docid, docid);
   }
 
-  protected String getLIRState(ZkController zkController, String collection, String shard) throws KeeperException, InterruptedException {
+  private String getLIRState(ZkController zkController, String collection, String shard) throws KeeperException, InterruptedException {
     StringBuilder sb = new StringBuilder();
     String path = zkController.getLeaderInitiatedRecoveryZnodePath(collection, shard);
     if (path == null)
@@ -436,7 +436,7 @@ public class ForceLeaderTest extends HttpPartitionTest {
     client.request(forceLeader);
   }
 
-  protected int getNumberOfActiveReplicas(ClusterState clusterState, String collection, String sliceId) {
+  private int getNumberOfActiveReplicas(ClusterState clusterState, String collection, String sliceId) {
     int numActiveReplicas = 0;
     // Assert all replicas are active
     for (Replica rep : clusterState.getCollection(collection).getSlice(sliceId).getReplicas()) {

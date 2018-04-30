@@ -144,6 +144,10 @@ public class TestInjection {
 
   private static AtomicInteger countPrepRecoveryOpPauseForever = new AtomicInteger(0);
 
+  public static Integer delayBeforeSlaveCommitRefresh=null;
+
+  public static boolean uifOutOfMemoryError = false;
+
   public static void reset() {
     nonGracefullClose = null;
     failReplicaRequests = null;
@@ -158,6 +162,8 @@ public class TestInjection {
     waitForReplicasInSync = "true:60";
     failIndexFingerprintRequests = null;
     wrongIndexFingerprint = null;
+    delayBeforeSlaveCommitRefresh = null;
+    uifOutOfMemoryError = false;
 
     for (Timer timer : timers) {
       timer.cancel();
@@ -453,6 +459,25 @@ public class TestInjection {
       percent = m.group(2);
     }
     return new Pair<>(Boolean.parseBoolean(val), Integer.parseInt(percent));
+  }
+
+  public static boolean injectDelayBeforeSlaveCommitRefresh() {
+    if (delayBeforeSlaveCommitRefresh!=null) {
+      try {
+        log.info("Pausing IndexFetcher for {}ms", delayBeforeSlaveCommitRefresh);
+        Thread.sleep(delayBeforeSlaveCommitRefresh);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    return true;
+  }
+
+  public static boolean injectUIFOutOfMemoryError() {
+    if (uifOutOfMemoryError ) {
+      throw new OutOfMemoryError("Test Injection");
+    }
+    return true;
   }
 
 }

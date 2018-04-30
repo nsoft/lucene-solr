@@ -37,6 +37,7 @@ import org.apache.solr.cloud.autoscaling.sim.SimCloudManager;
 import org.apache.solr.common.cloud.ClusterState;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.TimeSource;
+import org.apache.solr.core.SolrResourceLoader;
 import org.apache.solr.util.LogLevel;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -122,8 +123,8 @@ public class ScheduledMaintenanceTriggerTest extends SolrCloudTestCase {
 
   public static class CapturingTriggerListener extends TriggerListenerBase {
     @Override
-    public void init(SolrCloudManager cloudManager, AutoScalingConfig.TriggerListenerConfig config) {
-      super.init(cloudManager, config);
+    public void configure(SolrResourceLoader loader, SolrCloudManager cloudManager, AutoScalingConfig.TriggerListenerConfig config) throws TriggerValidationException {
+      super.configure(loader, cloudManager, config);
       listenerCreated.countDown();
     }
 
@@ -164,7 +165,7 @@ public class ScheduledMaintenanceTriggerTest extends SolrCloudTestCase {
         .setShardName("shard1");
     split1.process(solrClient);
     CloudTestUtils.waitForState(cloudManager, "failed to split " + collection1, collection1,
-        CloudTestUtils.clusterShape(3, 1));
+        CloudTestUtils.clusterShape(3, 1, true));
 
     String setListenerCommand = "{" +
         "'set-listener' : " +

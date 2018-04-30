@@ -21,8 +21,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.EnumSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.solr.client.solrj.embedded.JettySolrRunner;
@@ -30,15 +34,19 @@ import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.request.CoreStatus;
 import org.apache.solr.cloud.overseer.OverseerAction;
 import org.apache.solr.common.SolrException;
+import org.apache.solr.common.SolrInputDocument;
+import org.apache.solr.common.cloud.CollectionStateWatcher;
 import org.apache.solr.common.cloud.DocCollection;
 import org.apache.solr.common.cloud.Replica;
 import org.apache.solr.common.cloud.Slice;
 import org.apache.solr.common.cloud.ZkNodeProps;
 import org.apache.solr.common.cloud.ZkStateReader;
+import org.apache.solr.common.cloud.ZkStateReaderAccessor;
 import org.apache.solr.common.util.TimeSource;
 import org.apache.solr.common.util.Utils;
 import org.apache.solr.core.ZkContainer;
 import org.apache.solr.util.TimeOut;
+import org.apache.zookeeper.KeeperException;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -81,12 +89,17 @@ public class DeleteReplicaTest extends SolrCloudTestCase {
     assertTrue("Unexpected error message: " + e.getMessage(), e.getMessage().contains("state is 'active'"));
     assertTrue("Data directory for " + replica.getName() + " should not have been deleted", Files.exists(dataDir));
 
+    JettySolrRunner replicaJetty = cluster.getReplicaJetty(replica);
+    ZkStateReaderAccessor accessor = new ZkStateReaderAccessor(replicaJetty.getCoreContainer().getZkController().getZkStateReader());
+    Set<CollectionStateWatcher> watchers = accessor.getStateWatchers(collectionName);
     CollectionAdminRequest.deleteReplica(collectionName, shard.getName(), replica.getName())
         .process(cluster.getSolrClient());
     waitForState("Expected replica " + replica.getName() + " to have been removed", collectionName, (n, c) -> {
       Slice testShard = c.getSlice(shard.getName());
       return testShard.getReplica(replica.getName()) == null;
     });
+    // the core no longer watch collection state since it was removed
+    assertEquals(watchers.size() - 1, accessor.getStateWatchers(collectionName).size());
 
     assertFalse("Data directory for " + replica.getName() + " should have been removed", Files.exists(dataDir));
 
@@ -160,8 +173,63 @@ public class DeleteReplicaTest extends SolrCloudTestCase {
   }
 
   @Test
+  public void deleteReplicaFromClusterState() throws Exception {
+    deleteReplicaFromClusterState("true");
+    deleteReplicaFromClusterState("false");
+    CollectionAdminRequest.setClusterProperty(ZkStateReader.LEGACY_CLOUD, null).process(cluster.getSolrClient());
+  }
+
+  public void deleteReplicaFromClusterState(String legacyCloud) throws Exception {
+    CollectionAdminRequest.setClusterProperty(ZkStateReader.LEGACY_CLOUD, legacyCloud).process(cluster.getSolrClient());
+    final String collectionName = "deleteFromClusterState_"+legacyCloud;
+    CollectionAdminRequest.createCollection(collectionName, "conf", 1, 3)
+        .process(cluster.getSolrClient());
+    cluster.getSolrClient().add(collectionName, new SolrInputDocument("id", "1"));
+    cluster.getSolrClient().add(collectionName, new SolrInputDocument("id", "2"));
+    cluster.getSolrClient().commit(collectionName);
+
+    Slice shard = getCollectionState(collectionName).getSlice("shard1");
+    Replica replica = getRandomReplica(shard);
+    JettySolrRunner replicaJetty = cluster.getReplicaJetty(replica);
+    ZkStateReaderAccessor accessor = new ZkStateReaderAccessor(replicaJetty.getCoreContainer().getZkController().getZkStateReader());
+    Set<CollectionStateWatcher> watchers = accessor.getStateWatchers(collectionName);
+
+    ZkNodeProps m = new ZkNodeProps(
+        Overseer.QUEUE_OPERATION, OverseerAction.DELETECORE.toLower(),
+        ZkStateReader.CORE_NAME_PROP, replica.getCoreName(),
+        ZkStateReader.NODE_NAME_PROP, replica.getNodeName(),
+        ZkStateReader.COLLECTION_PROP, collectionName,
+        ZkStateReader.CORE_NODE_NAME_PROP, replica.getName(),
+        ZkStateReader.BASE_URL_PROP, replica.getBaseUrl());
+    Overseer.getStateUpdateQueue(cluster.getZkClient()).offer(Utils.toJSON(m));
+
+    waitForState("Timeout waiting for replica get deleted", collectionName,
+        (liveNodes, collectionState) -> collectionState.getSlice("shard1").getReplicas().size() == 2);
+
+    TimeOut timeOut = new TimeOut(60, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    timeOut.waitFor("Waiting for replica get unloaded", () ->
+        replicaJetty.getCoreContainer().getCoreDescriptor(replica.getCoreName()) == null
+    );
+    // the core no longer watch collection state since it was removed
+    timeOut = new TimeOut(60, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    timeOut.waitFor("Waiting for watcher get removed", () ->
+        watchers.size() - 1 == accessor.getStateWatchers(collectionName).size()
+    );
+
+    CollectionAdminRequest.deleteCollection(collectionName).process(cluster.getSolrClient());
+  }
+
+  @Test
+  @Slow
   public void raceConditionOnDeleteAndRegisterReplica() throws Exception {
-    final String collectionName = "raceDeleteReplica";
+    raceConditionOnDeleteAndRegisterReplica("true");
+    raceConditionOnDeleteAndRegisterReplica("false");
+    CollectionAdminRequest.setClusterProperty(ZkStateReader.LEGACY_CLOUD, null).process(cluster.getSolrClient());
+  }
+
+  public void raceConditionOnDeleteAndRegisterReplica(String legacyCloud) throws Exception {
+    CollectionAdminRequest.setClusterProperty(ZkStateReader.LEGACY_CLOUD, legacyCloud).process(cluster.getSolrClient());
+    final String collectionName = "raceDeleteReplica_"+legacyCloud;
     CollectionAdminRequest.createCollection(collectionName, "conf", 1, 2)
         .process(cluster.getSolrClient());
     waitForState("Expected 1x2 collections", collectionName, clusterShape(1, 2));
@@ -204,7 +272,6 @@ public class DeleteReplicaTest extends SolrCloudTestCase {
               ZkStateReader stateReader = replica1Jetty.getCoreContainer().getZkController().getZkStateReader();
               stateReader.forceUpdateCollection(collectionName);
               Slice shard = stateReader.getClusterState().getCollection(collectionName).getSlice("shard1");
-              LOG.error("Datcm get slice on 211 {}", shard);
               if (shard.getReplicas().size() == 1) {
                 replicaDeleted = true;
                 waitingForReplicaGetDeleted.release();
@@ -242,15 +309,17 @@ public class DeleteReplicaTest extends SolrCloudTestCase {
       ZkContainer.testing_beforeRegisterInZk = null;
     }
 
-
-    waitForState("Timeout for replica:"+replica1.getName()+" register itself as DOWN after failed to register", collectionName, (liveNodes, collectionState) -> {
-      Slice shard = collectionState.getSlice("shard1");
-      Replica replica = shard.getReplica(replica1.getName());
-      return replica != null && replica.getState() == DOWN;
+    TimeOut timeOut = new TimeOut(30, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    timeOut.waitFor("Timeout adding replica to shard", () -> {
+      try {
+        CollectionAdminRequest.addReplicaToShard(collectionName, "shard1")
+            .process(cluster.getSolrClient());
+        return true;
+      } catch (Exception e) {
+        // expected, when the node is not fully started
+        return false;
+      }
     });
-
-    CollectionAdminRequest.addReplicaToShard(collectionName, "shard1")
-        .process(cluster.getSolrClient());
     waitForState("Expected 1x2 collections", collectionName, clusterShape(1, 2));
 
     String leaderJettyNodeName = leaderJetty.getNodeName();
@@ -283,6 +352,59 @@ public class DeleteReplicaTest extends SolrCloudTestCase {
       Thread.sleep(100);
       if (timeOut.hasTimedOut()) fail("Wait for " + lostNodeName + " to leave failed!");
     }
+  }
+
+  @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 09-Apr-2018
+  public void deleteReplicaOnIndexing() throws Exception {
+    final String collectionName = "deleteReplicaOnIndexing";
+    CollectionAdminRequest.createCollection(collectionName, "conf", 1, 2)
+        .process(cluster.getSolrClient());
+    waitForState("", collectionName, clusterShape(1, 2));
+    AtomicBoolean closed = new AtomicBoolean(false);
+    Thread[] threads = new Thread[100];
+    for (int i = 0; i < threads.length; i++) {
+      int finalI = i;
+      threads[i] = new Thread(() -> {
+        int doc = finalI * 10000;
+        while (!closed.get()) {
+          try {
+            cluster.getSolrClient().add(collectionName, new SolrInputDocument("id", String.valueOf(doc++)));
+          } catch (Exception e) {
+            LOG.error("Failed on adding document to {}", collectionName, e);
+          }
+        }
+      });
+      threads[i].start();
+    }
+
+    Slice shard1 = getCollectionState(collectionName).getSlice("shard1");
+    Replica nonLeader = shard1.getReplicas(rep -> !rep.getName().equals(shard1.getLeader().getName())).get(0);
+    CollectionAdminRequest.deleteReplica(collectionName, "shard1", nonLeader.getName()).process(cluster.getSolrClient());
+    closed.set(true);
+    for (int i = 0; i < threads.length; i++) {
+      threads[i].join();
+    }
+
+    try {
+      cluster.getSolrClient().waitForState(collectionName, 20, TimeUnit.SECONDS, (liveNodes, collectionState) -> collectionState.getReplicas().size() == 1);
+    } catch (TimeoutException e) {
+      LOG.info("Timeout wait for state {}", getCollectionState(collectionName));
+      throw e;
+    }
+
+    TimeOut timeOut = new TimeOut(20, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    timeOut.waitFor("Time out waiting for LIR state get removed", () -> {
+      String lirPath = ZkController.getLeaderInitiatedRecoveryZnodePath(collectionName, "shard1");
+      try {
+        List<String> children = zkClient().getChildren(lirPath, null, true);
+        return children.size() == 0;
+      } catch (KeeperException.NoNodeException e) {
+        return true;
+      } catch (Exception e) {
+        throw new AssertionError(e);
+      }
+    });
   }
 }
 

@@ -46,15 +46,18 @@ import org.apache.solr.cloud.autoscaling.ComputePlanAction;
 import org.apache.solr.cloud.autoscaling.ExecutePlanAction;
 import org.apache.solr.cloud.autoscaling.NodeLostTrigger;
 import org.apache.solr.cloud.autoscaling.ScheduledTriggers;
+import org.apache.solr.cloud.autoscaling.SearchRateTrigger;
 import org.apache.solr.cloud.autoscaling.TriggerActionBase;
 import org.apache.solr.cloud.autoscaling.TriggerEvent;
 import org.apache.solr.cloud.autoscaling.TriggerEventQueue;
 import org.apache.solr.cloud.autoscaling.TriggerListenerBase;
 import org.apache.solr.cloud.autoscaling.CapturedEvent;
+import org.apache.solr.cloud.autoscaling.TriggerValidationException;
 import org.apache.solr.common.cloud.LiveNodesListener;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.TimeSource;
+import org.apache.solr.core.SolrResourceLoader;
 import org.apache.solr.util.LogLevel;
 import org.apache.solr.util.TimeOut;
 import org.junit.Before;
@@ -325,6 +328,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
   }
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 09-Apr-2018
   public void testNodeAddedTriggerRestoreState() throws Exception {
     // for this test we want to update the trigger so we must assert that the actions were created twice
     TestTriggerIntegration.actionInitCalled = new CountDownLatch(2);
@@ -436,6 +440,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
   }
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 26-Mar-2018
   public void testNodeLostTrigger() throws Exception {
     SolrClient solrClient = cluster.simGetSolrClient();
     String setTriggerCommand = "{" +
@@ -569,11 +574,12 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
     }
 
     @Override
-    public void init(Map<String, String> args) {
+    public void init() throws Exception {
       log.info("TestTriggerAction init");
+      super.init();
       actionInitCalled.countDown();
-      super.init(args);
     }
+
   }
 
   public static class TestEventQueueAction extends TriggerActionBase {
@@ -598,16 +604,17 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
     }
 
     @Override
-    public void init(Map<String, String> args) {
+    public void configure(SolrResourceLoader loader, SolrCloudManager cloudManager, Map<String, Object> args) throws TriggerValidationException {
       log.debug("TestTriggerAction init");
       actionInitCalled.countDown();
-      super.init(args);
+      super.configure(loader, cloudManager, args);
     }
   }
 
   public static long eventQueueActionWait = 5000;
 
   @Test
+  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 16-Apr-2018
   public void testEventQueue() throws Exception {
     waitForSeconds = 1;
     SolrClient solrClient = cluster.simGetSolrClient();
@@ -759,10 +766,10 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
     }
 
     @Override
-    public void init(Map<String, String> args) {
+    public void configure(SolrResourceLoader loader, SolrCloudManager cloudManager, Map<String, Object> args) throws TriggerValidationException {
       log.info("TestEventMarkerAction init");
       actionInitCalled.countDown();
-      super.init(args);
+      super.configure(loader, cloudManager, args);
     }
   }
 
@@ -883,8 +890,8 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
 
   public static class TestTriggerListener extends TriggerListenerBase {
     @Override
-    public void init(SolrCloudManager cloudManager, AutoScalingConfig.TriggerListenerConfig config) {
-      super.init(cloudManager, config);
+    public void configure(SolrResourceLoader loader, SolrCloudManager cloudManager, AutoScalingConfig.TriggerListenerConfig config) throws TriggerValidationException {
+      super.configure(loader, cloudManager, config);
       listenerCreated.countDown();
     }
 
@@ -1158,7 +1165,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
         "'event' : 'searchRate'," +
         "'waitFor' : '" + waitForSeconds + "s'," +
         "'enabled' : true," +
-        "'rate' : 1.0," +
+        "'aboveRate' : 1.0," +
         "'actions' : [" +
         "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}" +
         "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}" +
@@ -1188,7 +1195,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
 //      solrClient.query(COLL1, query);
 //    }
 
-    cluster.getSimClusterStateProvider().simSetCollectionValue(COLL1, "QUERY./select.requestTimes:1minRate", 500, true);
+    cluster.getSimClusterStateProvider().simSetCollectionValue(COLL1, "QUERY./select.requestTimes:1minRate", 500, false, true);
 
     boolean await = triggerFiredLatch.await(20000 / SPEED, TimeUnit.MILLISECONDS);
     assertTrue("The trigger did not fire at all", await);
@@ -1210,12 +1217,12 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
     long now = cluster.getTimeSource().getTimeNs();
     // verify waitFor
     assertTrue(TimeUnit.SECONDS.convert(waitForSeconds, TimeUnit.NANOSECONDS) - WAIT_FOR_DELTA_NANOS <= now - ev.event.getEventTime());
-    Map<String, Double> nodeRates = (Map<String, Double>)ev.event.getProperties().get("node");
+    Map<String, Double> nodeRates = (Map<String, Double>)ev.event.getProperties().get(SearchRateTrigger.HOT_NODES);
     assertNotNull("nodeRates", nodeRates);
     assertTrue(nodeRates.toString(), nodeRates.size() > 0);
     AtomicDouble totalNodeRate = new AtomicDouble();
     nodeRates.forEach((n, r) -> totalNodeRate.addAndGet(r));
-    List<ReplicaInfo> replicaRates = (List<ReplicaInfo>)ev.event.getProperties().get("replica");
+    List<ReplicaInfo> replicaRates = (List<ReplicaInfo>)ev.event.getProperties().get(SearchRateTrigger.HOT_REPLICAS);
     assertNotNull("replicaRates", replicaRates);
     assertTrue(replicaRates.toString(), replicaRates.size() > 0);
     AtomicDouble totalReplicaRate = new AtomicDouble();
@@ -1223,7 +1230,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
       assertTrue(r.toString(), r.getVariable("rate") != null);
       totalReplicaRate.addAndGet((Double)r.getVariable("rate"));
     });
-    Map<String, Object> shardRates = (Map<String, Object>)ev.event.getProperties().get("shard");
+    Map<String, Object> shardRates = (Map<String, Object>)ev.event.getProperties().get(SearchRateTrigger.HOT_SHARDS);
     assertNotNull("shardRates", shardRates);
     assertEquals(shardRates.toString(), 1, shardRates.size());
     shardRates = (Map<String, Object>)shardRates.get(COLL1);
@@ -1231,7 +1238,7 @@ public class TestTriggerIntegration extends SimSolrCloudTestCase {
     assertEquals(shardRates.toString(), 1, shardRates.size());
     AtomicDouble totalShardRate = new AtomicDouble();
     shardRates.forEach((s, r) -> totalShardRate.addAndGet((Double)r));
-    Map<String, Double> collectionRates = (Map<String, Double>)ev.event.getProperties().get("collection");
+    Map<String, Double> collectionRates = (Map<String, Double>)ev.event.getProperties().get(SearchRateTrigger.HOT_COLLECTIONS);
     assertNotNull("collectionRates", collectionRates);
     assertEquals(collectionRates.toString(), 1, collectionRates.size());
     Double collectionRate = collectionRates.get(COLL1);
