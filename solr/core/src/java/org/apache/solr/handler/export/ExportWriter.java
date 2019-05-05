@@ -227,7 +227,7 @@ public class ExportWriter implements SolrCore.RawWriter, Closeable {
       //long begin = System.nanoTime();
       queue.reset();
       SortDoc top = queue.top();
-      for (int i = 0; i < leaves.size(); i++) {
+      for (int i = 0; i < leaves.size() && sets[i] != null; i++) {
         sortDoc.setNextReader(leaves.get(i));
         DocIdSetIterator it = new BitSetIterator(sets[i], 0); // cost is not useful here
         int docId;
